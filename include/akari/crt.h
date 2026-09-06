@@ -7,15 +7,14 @@
  * defines.
  *
  * Akari does NOT provide the C library.  exit(), malloc(), printf(),
- * errno, atexit(), the stdio FILE objects, string/math/stdlib/ctype
- * routines, etc., all come from whichever C library the consumer
- * links against -- typically coredll.dll on standard Windows CE
- * images, or a static libc such as llvm-libc / newlib.
+ * errno, atexit(), stdio FILE objects, string/math/stdlib/ctype,
+ * setjmp/longjmp, __stack_chk_guard/__stack_chk_fail all come from
+ * whichever C library the consumer links against (coredll.dll,
+ * newlib, llvm-libc).
  *
  * What Akari DOES define, and what this header exposes, are the
- * per-process MSVCRT data globals that no DLL exports (they are
- * owned by the CRT image in every Win32 toolchain): __argc, __argv,
- * __wargv, _acmdln, _wcmdln, _fmode, _doserrno, _commode.
+ * per-process MSVCRT data globals that no DLL exports (every Win32
+ * CRT defines its own copies).
  */
 #ifndef _AKARI_CRT_H_
 #define _AKARI_CRT_H_
@@ -23,21 +22,17 @@
 #include <stddef.h>
 #include <akari/compiler.h>
 
-#ifdef __cplusplus
-extern "C" {
-#endif
+AKARI_BEGIN_EXTERN_C
 
-extern int              __argc;
-extern char           **__argv;
-extern wchar_t        **__wargv;
-extern char            *_acmdln;     /* narrow command tail (argv[0]) */
-extern wchar_t         *_wcmdln;     /* full wide command line (GetCommandLineW result) */
-extern wchar_t         *_wcmdtail;   /* pointer into _wcmdln right after argv[0] -- WinMain's lpCmdLine */
-extern int              _fmode;      /* default file translation mode (O_BINARY is CE default; compat only) */
-extern int              _doserrno;   /* O.S. error mapping (errno <-> GetLastError), maintained by libc */
-extern int              _commode;    /* default commit-on-write flag for _fdopen/_setmode */
+extern int              __argc;       /* number of parsed arguments */
+extern char           **__argv;       /* narrow argument vector (CP_ACP or lossy ASCII) */
+extern wchar_t        **__wargv;      /* wide (native UTF-16) argument vector */
+extern char            *_acmdln;      /* narrow command tail (== __argv[0] when set) */
+extern wchar_t         *_wcmdln;      /* full wide command line (GetCommandLineW() result) */
+extern wchar_t         *_wcmdtail;    /* tail pointer handed to WinMain lpCmdLine */
+extern int              _fmode;       /* default file translation mode (0 = _O_BINARY) */
+extern int              _doserrno;    /* errno <-> GetLastError mapping (maintained by libc) */
+extern int              _commode;     /* default commit-on-write flag */
 
-#ifdef __cplusplus
-}
-#endif
+AKARI_END_EXTERN_C
 #endif /* _AKARI_CRT_H_ */
