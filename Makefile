@@ -2,23 +2,27 @@
 # Copyright (c) 2026 Akari CRT contributors
 # SPDX-License-Identifier: MIT
 #
-# Usage:
-#   make CROSS=armv7-wince-
-#   make hostcheck       (compile every TU with host gcc to validate build)
+# Builds:
+#   libakari.a       static CRT glue  (empty metadata; just the archives)
+#   akari_crt0.o     WinMainCRTStartup
+#   akari_crt0w.o    wWinMainCRTStartup
+#   akari_crt0c.o    mainCRTStartup
+#   akari_dllcrt.o   _DllMainCRTStartup
 #
-# This Makefile builds:
-#   libakari.a      CRT static glue library (startup + ABI helpers)
-#   akari_crt0.o    EXE startup (WinMainCRTStartup)
-#   akari_crt0w.o   EXE startup (wWinMainCRTStartup)
-#   akari_crt0c.o   EXE startup (mainCRTStartup)
-#   akari_dllcrt.o  DLL startup (_DllMainCRTStartup)
+# SCOPE: Akari is a minimal CRT startup / ABI glue layer ONLY.
+#   - C library (stdio/stdlib/string/math/...)    : provided by libc
+#       (coredll.dll msvcrt exports / newlib / llvm-libc).
+#   - C++ runtime / exceptions / RTTI            : libc++ / libc++abi.
+#   - Compiler builtins (__chkstk / __aeabi_*)   : compiler-rt
+#       (linked automatically by clang).
+#   - Linker script / section layout             : lld's job.  Pass
+#       -Wl,-subsystem:windowsce:9.0 -Wl,-entry:<...Startup> on the
+#       link line.
+#   - Win32 SDK / coredll import library         : consumer provides.
 #
-# SCOPE NOTE: Akari is a CRT/startup/ABI glue layer only.  It does NOT
-# ship a C library (use llvm-libc / newlib / coredll msvcrt exports) or
-# a Win32 SDK.  Compiler builtins (__chkstk, __aeabi_*, ...) come from
-# compiler-rt which clang links automatically; a linker script is not
-# required -- pass -Wl,-subsystem:windowsce:9.0
-# -Wl,-entry:WinMainCRTStartup to lld.
+# Akari's job: PE entry -> parse GetCommandLineW -> set __argc/__argv/
+# __wargv -> run .init_array/.ctors -> call user WinMain/main -> call
+# libc's exit() which invokes atexit and ExitProcess.
 
 CROSS       ?= armv7-wince-
 CC          = $(CROSS)clang
@@ -31,39 +35,29 @@ TARGET_FLAGS = -target thumbv7-unknown-windows-gnu -fshort-wchar -mthumb \
 CFLAGS      = -Os -fvisibility=hidden -Wall -Wextra $(INCLUDES) $(TARGET_FLAGS)
 ARFLAGS     = cr
 
-# ---- Source files (CRT glue only -- no libc, no SDK, no compiler-rt) ----
-C_SRCS = \
-    src/crt/crt0.c \
-    src/crt/crt_cpp.c \
-    src/crt/dllcrt.c \
-    src/crt/patchables.c \
-    src/misc/atexit.c \
-    src/misc/errno.c \
-    src/misc/exit.c \
-    src/misc/globals.c
+# Sources: EXE startup + DLL startup only.
+C_SRCS      = src/crt/crt0.c src/crt/dllcrt.c
+C_OBJS      = $(C_SRCS:.c=.o)
 
-C_OBJS   = $(C_SRCS:.c=.o)
-LIB_OBJS = $(C_OBJS)
-
-CRT0_OBJ   = build/akari_crt0.o
-CRT0W_OBJ  = build/akari_crt0w.o
-CRT0C_OBJ  = build/akari_crt0c.o
-DLLCRT_OBJ = build/akari_dllcrt.o
-LIB        = build/libakari.a
+CRT0_OBJ    = build/akari_crt0.o
+CRT0W_OBJ   = build/akari_crt0w.o
+CRT0C_OBJ   = build/akari_crt0c.o
+DLLCRT_OBJ  = build/akari_dllcrt.o
+LIB         = build/libakari.a
 
 .PHONY: all clean install hostcheck
 
 all: $(LIB) $(CRT0_OBJ) $(CRT0W_OBJ) $(CRT0C_OBJ) $(DLLCRT_OBJ)
 
 build:
-	@mkdir -p build src/crt src/misc
+	@mkdir -p build src/crt
 
 $(C_OBJS): %.o: %.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(LIB): $(LIB_OBJS) | build
-	$(AR) $(ARFLAGS) $@ $(LIB_OBJS)
+$(LIB): $(C_OBJS) | build
+	$(AR) $(ARFLAGS) $@ $(C_OBJS)
 
 $(CRT0_OBJ): src/crt/crt0.c | build
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -76,18 +70,18 @@ $(DLLCRT_OBJ): src/crt/dllcrt.c | build
 
 install: all
 	install -d $(PREFIX)/lib $(PREFIX)/include/akari
-	install -m 644 $(LIB) $(PREFIX)/lib/
-	install -m 644 $(CRT0_OBJ) $(PREFIX)/lib/
+	install -m 644 $(LIB)       $(PREFIX)/lib/
+	install -m 644 $(CRT0_OBJ)  $(PREFIX)/lib/
 	install -m 644 $(CRT0W_OBJ) $(PREFIX)/lib/
 	install -m 644 $(CRT0C_OBJ) $(PREFIX)/lib/
-	install -m 644 $(DLLCRT_OBJ) $(PREFIX)/lib/
+	install -m 644 $(DLLCRT_OBJ)$(PREFIX)/lib/
 	cp include/akari/*.h $(PREFIX)/include/akari/
 
 clean:
 	rm -rf build $(C_OBJS)
 
-# ---- Host-side build check: compile every TU with gcc (warning-free)
-#      and archive, to catch syntax/type errors without an ARM cross
+# ---- Host-side build check: compile every TU with gcc warning-free and
+#      archive, to catch syntax/type errors without an ARM cross
 #      toolchain.
 HOSTCC      ?= gcc
 HOSTCFLAGS  = -Os -Wall -Wextra -std=c99 -ffreestanding -fshort-wchar \

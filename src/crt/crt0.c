@@ -3,75 +3,84 @@
  * Copyright (c) 2026 Akari CRT contributors
  * SPDX-License-Identifier: MIT
  *
- * crt0.c -- EXE entry points for Windows CE PE/COFF (ARM Thumb).
+ * crt0.c -- EXE entry points (WinMainCRTStartup, wWinMainCRTStartup,
+ * mainCRTStartup). Win32 types are forward-declared locally; this CRT
+ * does NOT ship a Windows SDK.
  *
- * Responsibility: get from PE entry point to user's WinMain/wWinMain/main
- * with CRT initialisation done (TLS errno, atexit, C++ constructors,
- * __argc/__argv/__wargv from GetCommandLineW). No C library functions
- * are called here; memory for argv is allocated directly from
- * coredll!LocalAlloc and freed by ExitProcess.
+ * The only job of this file:
+ *   1. Enter from PE entry (no arguments, no return).
+ *   2. Parse GetCommandLineW() into __argc / __argv / __wargv / _acmdln.
+ *   3. Run C++ constructors recorded in .init_array / .ctors.
+ *   4. Call the user's WinMain / wWinMain / main (weak; one is provided).
+ *   5. Call exit(return_code). exit() is provided by coredll.dll (or
+ *      whichever C library is linked in); it runs atexit handlers
+ *      and terminates via ExitProcess.
+ *
+ * Symbols the consumer's libc / coredll must provide:
+ *   exit(), malloc(), free(), LocalAlloc/LocalFree,
+ *   GetModuleHandleW, GetCommandLineW, ExitProcess, DisableThreadLibraryCalls.
+ *
+ * MSVCRT data symbols (__argc, __argv, __wargv, _acmdln, _fmode, _doserrno)
+ * are DEFINED here because, despite coredll exporting most C functions,
+ * it does NOT export these per-process data globals -- every Windows C
+ * runtime (msvcrt / mingwrt / ucrt / this CRT) defines them.
  */
 #include <stddef.h>
 #include <stdint.h>
 #include <akari/compiler.h>
 
-/* ---- Minimal Win32 forward declarations (coredll.dll) ---- */
-typedef void          *HINSTANCE;
-typedef void          *HMODULE;
-typedef void          *HANDLE;
-typedef int            BOOL;
-typedef unsigned int   UINT;
-typedef unsigned long  DWORD;
+/* ---------- forward-declared Win32 / coredll types ---------- */
+typedef void *HINSTANCE, *HMODULE, *HANDLE, *LPVOID;
+typedef int BOOL;
+typedef unsigned int UINT;
+typedef unsigned long DWORD;
 typedef unsigned short WCHAR;
-typedef long           LONG;
-typedef const char    *LPCSTR;
-typedef char          *LPSTR;
-typedef const WCHAR   *LPCWSTR;
-typedef WCHAR         *LPWSTR;
-typedef void          *LPVOID;
-typedef intptr_t       INT_PTR;
+typedef unsigned long size_t_local;
+typedef const char *LPCSTR;  typedef char *LPSTR;
+typedef const WCHAR *LPCWSTR; typedef WCHAR *LPWSTR;
 
-#define LPTR                 0x0040
-#define TLS_OUT_OF_INDEXES   ((DWORD)0xFFFFFFFF)
-#define SW_SHOW              1
+#define LPTR               0x0040
+#define SW_SHOW            1
 
 AKARI_DLLIMPORT HMODULE GetModuleHandleW(LPCWSTR);
 AKARI_DLLIMPORT LPWSTR  GetCommandLineW(void);
-AKARI_DLLIMPORT void    ExitProcess(UINT);
-AKARI_DLLIMPORT DWORD   TlsAlloc(void);
-AKARI_DLLIMPORT LPVOID  TlsGetValue(DWORD);
-AKARI_DLLIMPORT BOOL    TlsSetValue(DWORD, LPVOID);
-AKARI_DLLIMPORT LPVOID  LocalAlloc(UINT, UINT);
+AKARI_DLLIMPORT HANDLE  LocalAlloc(UINT, UINT);
 AKARI_DLLIMPORT HANDLE  LocalFree(HANDLE);
 AKARI_DLLIMPORT void    DisableThreadLibraryCalls(HMODULE);
+/* exit(), malloc(), free() are provided by whichever C library the
+ * consumer links against -- static or from coredll.dll. We declare
+ * them as ordinary externs (no dllimport) so they resolve from any
+ * kind of definition. */
+extern void exit(int) __attribute__((noreturn));
+extern void *malloc(unsigned long);
+extern void  free(void *);
 
-/* ---- CRT helpers in other TUs ---- */
-void _akari_errno_init(void);
-void _akari_atexit_init(void);
-void _akari_atexit_fini(void);
-
-/* ---- MSVCRT globals ---- */
-extern int        __argc;
-extern char     **__argv;
-extern WCHAR    **__wargv;
-extern char      *_acmdln;
-extern WCHAR     *_wcmdln;
-
-/* ---- User entry points (weak; user provides exactly one) ---- */
+/* ---------- User entry points (weak; consumer provides exactly one) ---------- */
 int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) __attribute__((weak));
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) __attribute__((weak));
 int main(int, char **, char **) __attribute__((weak));
 
 static int WINAPI _dflt_WinMain(HINSTANCE h, HINSTANCE ph, LPSTR c, int s) {
     (void)h; (void)ph; (void)c; (void)s;
-    return main ? main(0, NULL, NULL) : 0;
+    return main ? main(0, (char**)0, (char**)0) : 0;
 }
 static int WINAPI _dflt_wWinMain(HINSTANCE h, HINSTANCE ph, LPWSTR c, int s) {
     (void)h; (void)ph; (void)c; (void)s;
-    return main ? main(0, NULL, NULL) : 0;
+    return main ? main(0, (char**)0, (char**)0) : 0;
 }
 
-/* ---- .init_array / .ctors ranges ---- */
+/* ---------- MSVCRT-visible data globals defined by this CRT ---------- */
+int        __argc = 0;
+char     **__argv = (void*)0;
+WCHAR    **__wargv = (void*)0;
+char      *_acmdln = (void*)0;
+WCHAR     *_wcmdln = (void*)0;
+int        _fmode  = 0;
+int        _doserrno = 0;
+int        _commode = 0;
+unsigned long _akari_sys_blocksize = 4096;
+
+/* ---------- .init_array / .ctors ---------- */
 typedef void (*init_fn)(void);
 extern init_fn __init_array_start[] __attribute__((weak));
 extern init_fn __init_array_end[]   __attribute__((weak));
@@ -90,17 +99,16 @@ static void _run_ctors(void)
         size_t n = 0;
         if ((intptr_t)list[0] == -1) { list++; while (list[n]) n++; }
         else { while ((intptr_t)list[n] != 0) n++; }
-        for (size_t i = n; i > 0; i--)
-            if (list[i-1]) list[i-1]();
+        for (size_t i = n; i > 0; i--) if (list[i-1]) list[i-1]();
     }
 }
 
+/* ---------- CommandLineToArgvW parser (wchar_t) ---------- */
 static unsigned wlen(const WCHAR *p) { unsigned n=0; if (p) while (*p++) n++; return n; }
 
-/* CommandLineToArgvW-style parser. Returns heap (LocalAlloc) array. */
 static WCHAR **_parse_cmdline(const WCHAR *cmd, int *out_argc)
 {
-    if (!cmd) { *out_argc = 0; return NULL; }
+    if (!cmd) { *out_argc = 0; return (WCHAR**)0; }
     int n = 0, in_q = 0;
     const WCHAR *s = cmd;
     while (*s) {
@@ -109,9 +117,8 @@ static WCHAR **_parse_cmdline(const WCHAR *cmd, int *out_argc)
         n++;
         while (*s) {
             if (*s == L'\\') {
-                int bs = 0;
-                while (s[bs] == L'\\') bs++;
-                if (s[bs] == L'"') { s += bs + 1; } else { s += bs; break; }
+                int bs = 0; while (s[bs] == L'\\') bs++;
+                if (s[bs] == L'"') { s += bs+1; } else { s += bs; break; }
                 continue;
             }
             if (*s == L'"') { in_q = !in_q; s++; continue; }
@@ -121,12 +128,10 @@ static WCHAR **_parse_cmdline(const WCHAR *cmd, int *out_argc)
     }
     if (n == 0) n = 1;
     WCHAR **argv = (WCHAR**)LocalAlloc(LPTR, (UINT)(sizeof(WCHAR*) * (unsigned)(n+1)));
-    if (!argv) { *out_argc = 0; return NULL; }
-
+    if (!argv) { *out_argc = 0; return (WCHAR**)0; }
     unsigned clen = wlen(cmd);
-    WCHAR *buf = (WCHAR*)LocalAlloc(LPTR, (UINT)(sizeof(WCHAR) * (clen + 2)));
-    if (!buf) { *out_argc = 0; return NULL; }
-
+    WCHAR *buf = (WCHAR*)LocalAlloc(LPTR, (UINT)(sizeof(WCHAR)*(clen+2)));
+    if (!buf) { *out_argc = 0; return (WCHAR**)0; }
     int a = 0; in_q = 0; s = cmd;
     while (*s && a < n) {
         while (*s == L' ' || *s == L'\t') s++;
@@ -134,13 +139,12 @@ static WCHAR **_parse_cmdline(const WCHAR *cmd, int *out_argc)
         int bi = 0;
         while (*s) {
             if (*s == L'\\') {
-                int sl = 0;
-                while (s[sl] == L'\\') sl++;
+                int sl = 0; while (s[sl] == L'\\') sl++;
                 if (s[sl] == L'"') {
-                    int keep = sl / 2;
+                    int keep = sl/2;
                     for (int i = 0; i < keep; i++) buf[bi++] = L'\\';
                     if (sl & 1) buf[bi++] = L'"'; else in_q = !in_q;
-                    s += sl + 1;
+                    s += sl+1;
                 } else {
                     for (int i = 0; i < sl; i++) buf[bi++] = L'\\';
                     s += sl;
@@ -152,7 +156,7 @@ static WCHAR **_parse_cmdline(const WCHAR *cmd, int *out_argc)
             buf[bi++] = *s++;
         }
         buf[bi] = L'\0';
-        WCHAR *dup = (WCHAR*)LocalAlloc(LPTR, (UINT)(sizeof(WCHAR) * (unsigned)(bi+1)));
+        WCHAR *dup = (WCHAR*)LocalAlloc(LPTR, (UINT)(sizeof(WCHAR)*(unsigned)(bi+1)));
         if (dup) { for (int i = 0; i <= bi; i++) dup[i] = buf[i]; }
         argv[a++] = dup;
     }
@@ -162,7 +166,7 @@ static WCHAR **_parse_cmdline(const WCHAR *cmd, int *out_argc)
         if (argv[0]) argv[0][0] = L'\0';
         a = 1;
     }
-    argv[a] = NULL;
+    argv[a] = (WCHAR*)0;
     *out_argc = a;
     return argv;
 }
@@ -170,9 +174,9 @@ static WCHAR **_parse_cmdline(const WCHAR *cmd, int *out_argc)
 static char **_w2n(WCHAR **wv, int argc)
 {
     char **a = (char**)LocalAlloc(LPTR, (UINT)(sizeof(char*) * (unsigned)(argc+1)));
-    if (!a) return NULL;
+    if (!a) return (char**)0;
     for (int i = 0; i < argc; i++) {
-        const WCHAR *w = wv ? wv[i] : NULL;
+        const WCHAR *w = wv ? wv[i] : (const WCHAR*)0;
         unsigned l = wlen(w);
         char *nb = (char*)LocalAlloc(LPTR, l+1);
         if (nb && w) {
@@ -181,65 +185,54 @@ static char **_w2n(WCHAR **wv, int argc)
         } else if (nb) nb[0] = '\0';
         a[i] = nb;
     }
-    a[argc] = NULL;
+    a[argc] = (char*)0;
     return a;
 }
 
-static void _parse_args(const WCHAR *cmd)
-{
-    _wcmdln = (WCHAR*)cmd;
-    __wargv = _parse_cmdline(cmd, &__argc);
-    __argv  = _w2n(__wargv, __argc);
-    if (__argv && __argc > 0 && __argv[0]) _acmdln = __argv[0];
-}
-
+/* ---------- Common runtime init ---------- */
 static void _init_runtime(void)
 {
-    _akari_errno_init();
-    _akari_atexit_init();
-    _parse_args(GetCommandLineW());
+    _wcmdln = GetCommandLineW();
+    __wargv = _parse_cmdline(_wcmdln, &__argc);
+    __argv  = _w2n(__wargv, __argc);
+    if (__argv && __argc > 0 && __argv[0]) _acmdln = __argv[0];
     _run_ctors();
 }
 
-static void NORETURN _exit_to_os(int code) { ExitProcess((UINT)code); for(;;){} }
-
-void NORETURN _akari_cexit(int code)
+/* ---------- PE entry points ---------- */
+void WINAPI WinMainCRTStartup(void)
 {
-    _akari_atexit_fini();
-    _exit_to_os(code);
-}
-
-static void NORETURN _entry_winmain(void)
-{
-    HINSTANCE hinst = (HINSTANCE)GetModuleHandleW(NULL);
+    HINSTANCE hinst = (HINSTANCE)GetModuleHandleW((const WCHAR*)0);
     _init_runtime();
     int WINAPI (*wm)(HINSTANCE,HINSTANCE,LPSTR,int) =
         WinMain ? WinMain : _dflt_WinMain;
-    char *tail = "";
+    static char empty_tail[] = "";
+    char *tail = empty_tail;
     if (__argv && __argc > 1 && __argv[1]) tail = __argv[1];
-    int r = wm(hinst, NULL, tail, SW_SHOW);
-    _akari_cexit(r);
+    int r = wm(hinst, (HINSTANCE)0, tail, SW_SHOW);
+    exit(r);
+    for (;;) { }
 }
-static void NORETURN _entry_wwinmain(void)
+
+void WINAPI wWinMainCRTStartup(void)
 {
-    HINSTANCE hinst = (HINSTANCE)GetModuleHandleW(NULL);
+    HINSTANCE hinst = (HINSTANCE)GetModuleHandleW((const WCHAR*)0);
     _init_runtime();
     int WINAPI (*wm)(HINSTANCE,HINSTANCE,LPWSTR,int) =
         wWinMain ? (int WINAPI (*)(HINSTANCE,HINSTANCE,LPWSTR,int))wWinMain
                  : (int WINAPI (*)(HINSTANCE,HINSTANCE,LPWSTR,int))_dflt_wWinMain;
-    WCHAR *wt = L"";
+    static WCHAR empty_wtail[] = { 0 };
+    WCHAR *wt = empty_wtail;
     if (__wargv && __argc > 1 && __wargv[1]) wt = __wargv[1];
-    int r = wm(hinst, NULL, wt, SW_SHOW);
-    _akari_cexit(r);
-}
-static void NORETURN _entry_main(void)
-{
-    _init_runtime();
-    int r = main ? main(__argc, __argv, NULL) : 0;
-    _akari_cexit(r);
+    int r = wm(hinst, (HINSTANCE)0, wt, SW_SHOW);
+    exit(r);
+    for (;;) { }
 }
 
-/* PE entry points */
-void WINAPI WinMainCRTStartup(void)  { _entry_winmain(); }
-void WINAPI wWinMainCRTStartup(void) { _entry_wwinmain(); }
-void WINAPI mainCRTStartup(void)     { _entry_main(); }
+void WINAPI mainCRTStartup(void)
+{
+    _init_runtime();
+    int r = main ? main(__argc, __argv, (char**)0) : 0;
+    exit(r);
+    for (;;) { }
+}

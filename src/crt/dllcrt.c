@@ -3,28 +3,22 @@
  * Copyright (c) 2026 Akari CRT contributors
  * SPDX-License-Identifier: MIT
  *
- * dllcrt.c -- _DllMainCRTStartup: DLL entry point glue for PE/COFF
- * DLLs targeting Windows CE. Attaches to DLL_PROCESS_ATTACH by
- * initialising CRT state and running C++ constructors, then calls
- * the user-supplied DllMain (weak).
+ * dllcrt.c -- _DllMainCRTStartup: DLL entry-point glue.  Initialises
+ * per-DLL state, disables thread-library calls, runs .init_array
+ * constructors and then dispatches to the user-supplied weak DllMain.
  */
 #include <stddef.h>
+#include <stdint.h>
 #include <akari/compiler.h>
 
-typedef void *HANDLE;
-typedef void *HMODULE;
+typedef void *HMODULE, *LPVOID;
 typedef unsigned long DWORD;
-typedef void *LPVOID;
 typedef int BOOL;
+typedef int (WINAPI *DllMain_t)(HMODULE, DWORD, LPVOID);
 
-__declspec(dllimport) void DisableThreadLibraryCalls(HMODULE);
+AKARI_DLLIMPORT void DisableThreadLibraryCalls(HMODULE);
 
-void _akari_errno_init(void);
-void _akari_atexit_init(void);
-
-typedef BOOL (WINAPI *DllMain_t)(HMODULE, DWORD, LPVOID);
-
-int WINAPI DllMain(HMODULE h, DWORD reason, LPVOID reserved) __attribute__((weak));
+int WINAPI DllMain(HMODULE, DWORD, LPVOID) __attribute__((weak));
 int WINAPI DllMain(HMODULE h, DWORD reason, LPVOID reserved) {
     (void)h; (void)reason; (void)reserved; return 1;
 }
@@ -44,8 +38,6 @@ static void _run_ctors(void) {
 int WINAPI _DllMainCRTStartup(HMODULE hDll, DWORD reason, LPVOID lpvReserved)
 {
     if (reason == 1 /* DLL_PROCESS_ATTACH */) {
-        _akari_errno_init();
-        _akari_atexit_init();
         DisableThreadLibraryCalls(hDll);
         _run_ctors();
     }
