@@ -1,0 +1,2 @@
+# wince-crt
+windowsce-crt
