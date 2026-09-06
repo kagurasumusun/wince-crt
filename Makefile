@@ -4,40 +4,34 @@
 #
 # Usage:
 #   make CROSS=armv7-wince-
-#   make hostcheck       (compiles every TU with host gcc to validate build)
+#   make hostcheck       (compile every TU with host gcc to validate build)
 #
 # This Makefile builds:
-#   libakari.a      CRT static library (startup + ABI glue)
+#   libakari.a      CRT static glue library (startup + ABI helpers)
 #   akari_crt0.o    EXE startup (WinMainCRTStartup)
 #   akari_crt0w.o   EXE startup (wWinMainCRTStartup)
 #   akari_crt0c.o   EXE startup (mainCRTStartup)
 #   akari_dllcrt.o  DLL startup (_DllMainCRTStartup)
 #
-# The CRT does NOT ship a C library or Win32 SDK. Consumers supply
-# those via their own libc and SDK headers/libraries. The expected
-# link line (clang --target=thumbv7-unknown-windows-gnu) is:
-#
-#   clang --target=thumbv7-unknown-windows-gnu -fshort-wchar \
-#         -nostdlib -fuse-ld=lld \
-#         -Wl,-subsystem:windowsce:9.0 \
-#         -Wl,-entry:WinMainCRTStartup \
-#         your_obj.o akari_crt0.o -lakari -lcoredll -o your.exe
+# SCOPE NOTE: Akari is a CRT/startup/ABI glue layer only.  It does NOT
+# ship a C library (use llvm-libc / newlib / coredll msvcrt exports) or
+# a Win32 SDK.  Compiler builtins (__chkstk, __aeabi_*, ...) come from
+# compiler-rt which clang links automatically; a linker script is not
+# required -- pass -Wl,-subsystem:windowsce:9.0
+# -Wl,-entry:WinMainCRTStartup to lld.
 
-# ---- Configuration ----
 CROSS       ?= armv7-wince-
 CC          = $(CROSS)clang
 AR          = $(CROSS)llvm-ar
-AS          = $(CROSS)clang
 
 INCLUDES    = -Iinclude
-TARGET_FLAGS = -target armv7-unknown-windows-gnu -fshort-wchar -mthumb \
+TARGET_FLAGS = -target thumbv7-unknown-windows-gnu -fshort-wchar -mthumb \
               -ffreestanding -fno-builtin -nostdlibinc \
               -D_AKARI_BUILD=1
 CFLAGS      = -Os -fvisibility=hidden -Wall -Wextra $(INCLUDES) $(TARGET_FLAGS)
-ASFLAGS     = $(CFLAGS)
 ARFLAGS     = cr
 
-# ---- Source files ----
+# ---- Source files (CRT glue only -- no libc, no SDK, no compiler-rt) ----
 C_SRCS = \
     src/crt/crt0.c \
     src/crt/crt_cpp.c \
@@ -48,15 +42,8 @@ C_SRCS = \
     src/misc/exit.c \
     src/misc/globals.c
 
-ARM_ASM_SRCS = \
-    src/compiler-rt/chkstk_arm.S \
-    src/compiler-rt/aeabi_idivmod.S
-
-STARTUP_C_SRCS = src/crt/crt0.c src/crt/dllcrt.c
-
 C_OBJS   = $(C_SRCS:.c=.o)
-ASM_OBJS = $(ARM_ASM_SRCS:.S=.o)
-LIB_OBJS = $(C_OBJS) $(ASM_OBJS)
+LIB_OBJS = $(C_OBJS)
 
 CRT0_OBJ   = build/akari_crt0.o
 CRT0W_OBJ  = build/akari_crt0w.o
@@ -64,28 +51,20 @@ CRT0C_OBJ  = build/akari_crt0c.o
 DLLCRT_OBJ = build/akari_dllcrt.o
 LIB        = build/libakari.a
 
-.PHONY: all clean install hostcheck samples
+.PHONY: all clean install hostcheck
 
 all: $(LIB) $(CRT0_OBJ) $(CRT0W_OBJ) $(CRT0C_OBJ) $(DLLCRT_OBJ)
 
 build:
-	@mkdir -p build src/crt src/misc src/compiler-rt
+	@mkdir -p build src/crt src/misc
 
 $(C_OBJS): %.o: %.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(ASM_OBJS): %.o: %.S
-	@mkdir -p $(dir $@)
-	$(AS) $(ASFLAGS) -c $< -o $@
-
 $(LIB): $(LIB_OBJS) | build
 	$(AR) $(ARFLAGS) $@ $(LIB_OBJS)
 
-# Startup objects are the same TU compiled with different -D flags so that
-# only one entry symbol is emitted; or in our design we simply provide all
-# three entries in one object (crt0.o) and let /ENTRY: choose.  We still
-# produce the traditional named objects for compatibility.
 $(CRT0_OBJ): src/crt/crt0.c | build
 	$(CC) $(CFLAGS) -c $< -o $@
 $(CRT0W_OBJ): src/crt/crt0.c | build
@@ -105,13 +84,11 @@ install: all
 	cp include/akari/*.h $(PREFIX)/include/akari/
 
 clean:
-	rm -rf build $(C_OBJS) $(ASM_OBJS)
+	rm -rf build $(C_OBJS)
 
-# ---- Host-side build sanity check: compile every TU with gcc to
-#      confirm there are no syntax errors (this does NOT link; it
-#      just exercises the compiler on each source).  We also build a
-#      static archive from the objects to verify the object set is
-#      self-consistent at the symbol level.
+# ---- Host-side build check: compile every TU with gcc (warning-free)
+#      and archive, to catch syntax/type errors without an ARM cross
+#      toolchain.
 HOSTCC      ?= gcc
 HOSTCFLAGS  = -Os -Wall -Wextra -std=c99 -ffreestanding -fshort-wchar \
               -D_AKARI_BUILD=1 -D_DEBUG_HOSTCHECK_ \
@@ -120,10 +97,10 @@ HOSTCFLAGS  = -Os -Wall -Wextra -std=c99 -ffreestanding -fshort-wchar \
               -Wno-long-long -Wno-pointer-to-int-cast -Wno-int-to-pointer-cast \
               -Wno-incompatible-pointer-types -Wno-builtin-declaration-mismatch \
               -Wno-pedantic
-HOST_OBJS = $(patsubst %.c,build/host/%.o,$(C_SRCS))
+
 hostcheck: | build
 	@echo "[hostcheck] building CRT objects with $(HOSTCC)"
-	@mkdir -p $(dir $(HOST_OBJS))
+	@mkdir -p build/host
 	@set -e; for f in $(C_SRCS); do \
 	    echo "  CC  $$f"; \
 	    mkdir -p "build/host/$$(dirname $$f)"; \

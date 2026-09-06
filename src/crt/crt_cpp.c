@@ -95,4 +95,4 @@ uintptr_t __stack_chk_guard = 0x000a0dffUL;
 NORETURN void __stack_chk_fail(void) { for(;;){} }
 #endif
 
-extern void __chkstk(void);   /* in compiler-rt / chkstk_arm.S */
+/* __chkstk is part of compiler-rt and linked automatically by clang. */

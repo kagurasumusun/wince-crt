@@ -3,10 +3,18 @@
  * Copyright (c) 2026 Akari CRT contributors
  * SPDX-License-Identifier: MIT
  *
- * exit.c -- exit(), _exit(), _Exit(), abort().
- * All terminate via coredll!ExitProcess; exit() also runs atexit
- * handlers registered via _akari_atexit_fini. No stdio finalisation
- * happens here (that is a libc concern).
+ * exit.c -- _akari_cexit: internal shutdown helper called by the
+ * startup code after the user entry point returns.  It runs atexit
+ * handlers registered through this CRT and then calls coredll!
+ * ExitProcess.
+ *
+ * The standard C exit() / _Exit() / abort() / _exit() functions are
+ * NOT defined here -- they are provided by whichever C library the
+ * consumer links against (llvm-libc, newlib, coredll's msvcrt
+ * exports, ...). The startup code must NOT call exit() because that
+ * would drag the C library's shutdown path in ahead of time; instead
+ * it calls _akari_cexit() directly, which is intentionally a private
+ * symbol.
  */
 #include <akari/compiler.h>
 
@@ -15,10 +23,9 @@ __declspec(dllimport) void ExitProcess(unsigned int);
 
 void _akari_atexit_fini(void);
 
-NORETURN void _exit(int code)    { ExitProcess((unsigned int)code); for(;;){} }
-NORETURN void _Exit(int code)    { _exit(code); }
-NORETURN void abort(void)        { _exit(3); }
-
-void _akari_cexit(int code)      { _akari_atexit_fini(); _exit(code); }
-
-NORETURN void exit(int code)     { _akari_cexit(code); for(;;){} }
+NORETURN void _akari_cexit(int code)
+{
+    _akari_atexit_fini();
+    ExitProcess((unsigned int)code);
+    for (;;) { }
+}
