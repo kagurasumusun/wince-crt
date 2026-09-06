@@ -5,70 +5,60 @@
  *
  * crt0.c -- EXE entry points for Windows CE 4.0 through 6.0.
  *
- * Clean-room implementation, written against Microsoft's public
- * Win32 / Windows CE documentation and the PE/COFF specification.
- * No code from mingw-w64, cegcc/mingw32ce, msvcrt, ucrt, newlib,
- * glibc, dietlibc, or musl is copied or referenced.
+ * Clean-room implementation.  No code from msvcrt, ucrt, mingw-w64,
+ * cegcc/mingw32ce, newlib, glibc, dietlibc, or musl is referenced or
+ * copied.  Behaviour is derived from Microsoft's public Windows CE
+ * documentation (MSDN previous-versions library, Windows CE 5.0
+ * "Linking to the CRT"), the PE/COFF specification, the System V ABI,
+ * and observable Itanium/MSVC C++ ABI conventions as implemented by
+ * Clang/LLVM.
+ *
+ * OFFICIAL CE ENTRY POINTS (per Microsoft docs):
+ *   EXE:
+ *     WinMainCRTStartup   <- /ENTRY:WinMainCRTStartup  (no leading _)
+ *     wWinMainCRTStartup  <- /ENTRY:wWinMainCRTStartup
+ *     mainACRTStartup     <- /ENTRY:mainACRTStartup
+ *     mainWCRTStartup     <- /ENTRY:mainWCRTStartup
+ *   DLL:
+ *     _DllMainCRTStartup  <- /ENTRY:_DllMainCRTStartup (leading _)
+ *       (x86 emulator only: _DllMainCRTStartup@12 stdcall)
  *
  * SUPPORTED ARCHITECTURES:
- *   ARM (v4 / v4i / v5 / v6 / v7 Thumb / Thumb2 / IWMMXT)
- *   x86 (i486 and later, CEPC / DeviceEmulator)
- *   MIPS (MIPSII, MIPSII_FP, MIPSIV, MIPSIV_FP, MIPS16)
- *   SuperH (SH3 / SH4)
+ *   ARM (v4/v4i/v5/v6/v7 Thumb/Thumb2/IWMMXT), x86 (i486+, CEPC,
+ *   DeviceEmulator), MIPS (MIPSII/MIPSIV/MIPS16), SH3/SH4.
  *
- * CALLING CONVENTION: on Windows CE the Win32 ABI (and coredll
- * exports) use the platform's DEFAULT C calling convention on every
- * architecture.  On x86 CE this is __cdecl (NOT __stdcall; coredll
- * symbols are undecorated).  The WINAPI macro from compiler.h
- * therefore expands to empty on _WIN32_WCE targets.
- *
- * ENTRY POINTS EXPORTED (all live in this single TU):
- *   WinMainCRTStartup   GUI (ANSI alias on CE -> wide)
- *   wWinMainCRTStartup  GUI (wide, native)
- *   mainCRTStartup      console (narrow argv)
- *   mainWCRTStartup     console (wide argv)
- *   mainACRTStartup     console alias -> mainCRTStartup
- *
- * The linker picks exactly one based on -Wl,-entry:<name>; with
- * -ffunction-sections + --gc-sections the others are discarded.
+ * WINAPI is empty on CE (cdecl everywhere on CE ARM/MIPS/SH; coredll
+ * x86 CE exports are cdecl, undecorated).  See compiler.h.
  *
  * LIFECYCLE:
- *   1. Retrieve HINSTANCE from GetModuleHandleW(NULL).
- *   2. Fetch the WIDE command line with GetCommandLineW().
- *   3. If the raw command line does not begin with the executable
- *      path (quoted or unquoted), or is empty, query the module
- *      file name via GetModuleFileNameW() so __wargv[0] is always
- *      the program path (consistent with desktop CRT behaviour and
- *      CommandLineToArgvW).
- *   4. Parse the command line per CommandLineToArgvW rules into
- *      __argc/__wargv (backslash 2N/2N+1 rule, "" in-quote ->
- *      literal ", whitespace separators).
- *   5. Set _wcmdtail to point into the raw GetCommandLineW() buffer
- *      just past argv[0] (and any intervening whitespace) -- this
- *      is what WinMain/wWinMain's lpCmdLine points to, per the
- *      Microsoft contract (NOT a re-joined argv[1..] copy).
+ *   1. Save argv/argc state.
+ *   2. Get HINSTANCE + wide command line via coredll.
+ *   3. Retrieve executable path via GetModuleFileNameW so argv[0] is
+ *      always populated (some CE 4/5 launcher configurations omit
+ *      the program name from GetCommandLineW()).
+ *   4. Parse the wide command line per CommandLineToArgvW rules into
+ *      __argc / __wargv.
+ *   5. Compute _wcmdtail pointing past argv[0] in the raw buffer
+ *      (WinMain's lpCmdLine contract).
  *   6. Synthesize narrow __argv / _acmdln via WideCharToMultiByte
- *      (CP_ACP) from coredll when available; fall back to lossy
- *      7-bit pass-through (non-ASCII -> '?') on headless kernels
- *      that ship without codepage support.  We locate
- *      WideCharToMultiByte through GetProcAddress on coredll.dll
- *      rather than a weak dllimport, because weak dllimport is not
- *      reliable on COFF for symbols that may be absent.
- *   7. Run C++ constructors from .init_array (forward order per
- *      System V ABI) then legacy .ctors (reverse order for GCC
- *      sentinel lists produced by old ARM-CE GCC ports).
+ *      (resolved at runtime from coredll via GetProcAddress; falls
+ *      back to lossy ASCII when the converter is absent).
+ *   7. Run ALL global initializers that Clang/lld can emit, in three
+ *      layers:
+ *        (a) .init_array (forward, System V ABI; Clang/lld produces
+ *            these for windows-gnu).
+ *        (b) MSVC-style .CRT$XCU (and .CRT$XIU C initializers,
+ *            .CRT$XPU for pre-C) between .CRT$XCA and .CRT$XCZ
+ *            terminator pointers -- for code compiled with
+ *            -fms-extensions or toolchains that emit MSVC init
+ *            sections.
+ *        (c) Legacy .ctors sentinel list (reverse order) for old
+ *            CE GCC toolchains.
  *   8. Invoke the user's weak entry (WinMain/wWinMain/main/wmain).
- *   9. Call libc's exit(rc) which runs atexit / __cxa_finalize /
- *      stdio flush and finally ExitProcess.
- *
- * MSVCRT DATA GLOBALS DEFINED HERE (__argc/__argv/__wargv/_acmdln/
- * _wcmdln/_wcmdtail/_fmode/_doserrno/_commode) are NOT exported by
- * coredll.dll on CE; every Win32 CRT defines them.
- *
- * envp (third arg to main): Windows CE has no POSIX environment
- * block -- no environ, no getenv/setenv, no GetEnvironmentStrings.
- * The third argument is always NULL; it is accepted in the main()
- * prototype for POSIX source compatibility only.
+ *   9. Call libc's exit(rc).  exit() is imported normally; if at
+ *      static-link time it resolves to NULL (should never happen
+ *      with a proper libc), we fall back to ExitProcess(rc) so the
+ *      process cannot return into the loader.
  */
 #include <stddef.h>
 #include <stdint.h>
@@ -85,68 +75,69 @@ typedef wchar_t        WCHAR;
 typedef size_t         SIZE_T;
 typedef intptr_t       INTPTR_T;
 typedef uintptr_t      UINT_PTR;
+typedef int         (WINAPI *FARPROC0)(void);
+typedef FARPROC0       FARPROC;
 typedef void *HANDLE, *HINSTANCE, *HMODULE, *HLOCAL, *LPVOID;
-typedef const char   *LPCSTR;  typedef char   *LPSTR;
-typedef const WCHAR  *LPCWSTR; typedef WCHAR  *LPWSTR;
-typedef intptr_t      FARPROC;
+typedef const char    *LPCSTR;  typedef char   *LPSTR;
+typedef const WCHAR   *LPCWSTR; typedef WCHAR  *LPWSTR;
+typedef int         (WINAPI *wctomb_t)(UINT, DWORD, LPCWSTR, int,
+                                       LPSTR, int, LPCSTR, BOOL *);
+typedef int         (WINAPI *winmain_t)(HINSTANCE, HINSTANCE, LPWSTR, int);
+typedef int         (WINAPI *dllmain_t)(HINSTANCE, DWORD, LPVOID);
+typedef void               (*init_fn)(void);
 
-#define TRUE                1
-#define FALSE               0
-#define LPTR                0x0040u     /* LMEM_FIXED | LMEM_ZEROINIT */
-#define SW_SHOW             1
-#define SW_SHOWNORMAL       1
-#define CP_ACP              0u          /* system default ANSI code page */
-#define MAX_PATH            260
+#define TRUE             1
+#define FALSE            0
+#define LPTR             0x0040u   /* LMEM_FIXED | LMEM_ZEROINIT */
+#define SW_SHOW          1
+#define SW_SHOWNORMAL    1
+#define CP_ACP           0u
+#define MAX_PATH         260
+#define INFINITE         0xFFFFFFFFu
 
 /* ---------- coredll imports (unconditional) ---------- */
-AKARI_DLLIMPORT HMODULE GetModuleHandleW(LPCWSTR);
-AKARI_DLLIMPORT LPWSTR  GetCommandLineW(void);
-AKARI_DLLIMPORT DWORD   GetModuleFileNameW(HMODULE, LPWSTR, DWORD);
-AKARI_DLLIMPORT HLOCAL  LocalAlloc(UINT, SIZE_T);
-AKARI_DLLIMPORT HLOCAL  LocalFree(HLOCAL);
+AKARI_DLLIMPORT HMODULE  GetModuleHandleW(LPCWSTR);
+AKARI_DLLIMPORT LPWSTR   GetCommandLineW(void);
+AKARI_DLLIMPORT DWORD    GetModuleFileNameW(HMODULE, LPWSTR, DWORD);
+AKARI_DLLIMPORT HLOCAL   LocalAlloc(UINT, SIZE_T);
+AKARI_DLLIMPORT HLOCAL   LocalFree(HLOCAL);
 AKARI_DLLIMPORT FARPROC GetProcAddress(HMODULE, LPCSTR);
+AKARI_DLLIMPORT void     ExitProcess(UINT) __attribute__((noreturn));
+AKARI_DLLIMPORT void     DisableThreadLibraryCalls(HMODULE);
 
-/* ---------- WideCharToMultiByte, resolved at runtime ----------
- *
- * Resolved via GetProcAddress("coredll.dll", "WideCharToMultiByte")
- * so we build and link even on headless CE kernel configurations
- * where codepage conversion is absent.  If the pointer stays NULL
- * we fall back to a lossy path in _w2n_one. */
-typedef int (WINAPI *wctomb_t)(UINT cp, DWORD flags,
-                               LPCWSTR src, int srclen,
-                               LPSTR dst, int dstlen,
-                               LPCSTR defchar, BOOL *useddef);
-static wctomb_t _pWctomb = NULL;
-static int _resolve_wctomb(void)
-{
-    HMODULE core = GetModuleHandleW(L"coredll.dll");
-    if (!core) return 0;
-    _pWctomb = (wctomb_t)(INTPTR_T)GetProcAddress(core, "WideCharToMultiByte");
-    return _pWctomb ? 1 : 0;
-}
+/* C library entry points.  We import exit() weakly so that a
+ * consumer who ships their own libc without providing exit() still
+ * links; in that case we fall back to ExitProcess.  (This is NOT
+ * the normal path -- every libc provides exit().) */
+extern void exit(int) __attribute__((weak, noreturn));
 
-/* ---------- C library entry points (NOT dllimport -- may be static) ---------- */
-extern void NORETURN exit(int);
-/* Note: we do NOT use malloc/free from libc in this file -- all
- * allocations go through LocalAlloc/LocalFree against the process
- * heap, which is available the moment the PE loader hands control
- * to the entry point (the CRT heap may not be initialised yet). */
+/* ---------- __dso_handle ----------
+ *
+ * __dso_handle is the "dynamic shared object handle" consumed by
+ * __cxa_atexit() to register destructors against a specific load
+ * image.  It is normally provided by the CRT; for a statically-
+ * linked EXE on Windows CE the value does not matter (all
+ * destructors fire at exit() time), but the symbol must be defined
+ * because libc++abi emits references to it for every TU that has a
+ * non-trivial static object.  The value NULL is correct for the
+ * main executable image (per Itanium C++ ABI the NULL dso handle
+ * represents the main program; destructors registered with NULL
+ * fire at process exit). */
+void *__dso_handle = NULL;
 
-/* ---------- User entry points (weak; consumer provides exactly one) ----------
+/* ---------- User entry points (weak; consumer provides one) ----------
  *
- * Windows CE's native GUI entry is
- *     int WINAPI WinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
- * taking the WIDE command tail.  CE never exposes an ANSI WinMain
- * (LPSTR) -- the desktop ANSI entry is a Win9x compatibility shim.
- * We accept the ANSI-looking WinMain signature as an alias that
- * receives a wide pointer for source compatibility with code that
- * was written for desktop TCHAR builds; both map to the SAME wide
- * tail pointer.
+ * Windows CE's native GUI entry is:
+ *   int WINAPI WinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
+ * (WIDE command tail; no ANSI LPSTR variant exists on CE.)
  *
- * For console-style apps we also accept wmain(int, wchar_t**,
- * wchar_t**) (wide) and main(int, char**, char**) (narrow).  envp
- * is NULL on CE.
- */
+ * wWinMain is accepted as an alias for source compatibility with
+ * desktop Unicode builds.
+ *
+ * Console entries:
+ *   int main(int argc, char **argv, char **envp);
+ *   int wmain(int argc, wchar_t **wargv, wchar_t **envp);
+ * envp is NULL on Windows CE (no POSIX environment block). */
 int WINAPI WinMain (HINSTANCE, HINSTANCE, LPWSTR, int)  __attribute__((weak));
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)  __attribute__((weak));
 int main(int, char **, char **)                         __attribute__((weak));
@@ -160,37 +151,76 @@ static int WINAPI _dflt_WinMain(HINSTANCE h, HINSTANCE ph, LPWSTR c, int s)
     return 0;
 }
 
-/* ---------- MSVCRT-visible data globals ---------- */
+/* ---------- MSVCRT data globals ---------- */
 int        __argc     = 0;
 char     **__argv     = NULL;
 WCHAR    **__wargv    = NULL;
 char      *_acmdln    = NULL;
 WCHAR     *_wcmdln    = NULL;     /* raw GetCommandLineW result */
-WCHAR     *_wcmdtail  = NULL;     /* points into _wcmdln after argv[0] -> lpCmdLine */
-int        _fmode     = 0;        /* _O_BINARY default (CE has no text/binary distinction) */
+WCHAR     *_wcmdtail  = NULL;     /* WinMain lpCmdLine tail pointer */
+int        _fmode     = 0;
 int        _doserrno  = 0;
-int        _commode   = 0;        /* _IOCOMMIT */
+int        _commode   = 0;
 
-/* ---------- Constructors (.init_array forward, .ctors reverse) ----------
+/* ---------- Initializer table markers ----------
  *
- * Clang/lld for windows-gnu places constructors in .init_array.
- * Old ARM-CE GCC used .ctors sentinel lists; we walk them if
- * present for maximum compatibility.  .ctors entries are emitted in
- * reverse order so we invoke them from the end backwards.
+ * We emit terminator sentinels in three named PE sections so that
+ * when the linker merges sections alphabetically, our sentinels
+ * book-end the initializer function-pointer tables:
+ *
+ *   .CRT$XIA  (pre-C, C initializers)
+ *   .CRT$XCA  (start of C++ initializer range; null terminator)
+ *   .CRT$XCU  (user C++ dynamic initializers -- clang with
+ *               -fms-extensions puts __attribute__((constructor))
+ *               entries here)
+ *   .CRT$XCZ  (end of C++ range; null terminator)
+ *
+ * For .init_array / .ctors we rely on weak start/end symbols
+ * supplied by the linker script (or the COFF MinGW emulation in
+ * lld, which synthesises __CTOR_LIST__/__DTOR_LIST__).
  */
-typedef void (*init_fn)(void);
+#define DEFINE_CRT_TERM(x)                                              \
+    __attribute__((section(".CRT$" #x), used)) static init_fn _crt_##x = (init_fn)0;
+
+DEFINE_CRT_TERM(XIA)       /* pre-C start */
+DEFINE_CRT_TERM(XCA)       /* C++ start */
+DEFINE_CRT_TERM(XCZ)       /* C++ end */
+DEFINE_CRT_TERM(XPA)       /* pre-C++ start */
+DEFINE_CRT_TERM(XPZ)       /* pre-C++ end */
+DEFINE_CRT_TERM(XTA)       /* tlibc start */
+DEFINE_CRT_TERM(XTZ)       /* tlibc end */
+
+#undef DEFINE_CRT_TERM
+
+/* Pointer helpers for walking the .CRT$XI* / .CRT$XC* ranges.
+ * These are declared as arrays of init_fn pointers so that pointer
+ * arithmetic walks function-pointer entries (4 bytes each on all
+ * supported CE architectures, which are ILP32). */
+static init_fn *const _xi_start = &_crt_XIA + 1;
+static init_fn *const _xi_end   = &_crt_XCA;
+static init_fn *const _xc_start = &_crt_XCA + 1;
+static init_fn *const _xc_end   = &_crt_XCZ;
+
 extern init_fn __init_array_start[]  __attribute__((weak));
 extern init_fn __init_array_end[]    __attribute__((weak));
 extern init_fn __CTOR_LIST__[]       __attribute__((weak));
 extern init_fn __CTOR_END__[]        __attribute__((weak));
 
+static void _run_ctor_table(init_fn *start, init_fn *end)
+{
+    if (!start || !end) return;
+    for (init_fn *p = start; p < end; p++)
+        if (*p) (*p)();
+}
+
 static void _run_ctors(void)
 {
-    if (__init_array_start && __init_array_end) {
-        size_t n = (size_t)(__init_array_end - __init_array_start);
-        for (size_t i = 0; i < n; i++)
-            if (__init_array_start[i]) __init_array_start[i]();
-    }
+    if (__init_array_start && __init_array_end)
+        _run_ctor_table(__init_array_start, __init_array_end);
+
+    _run_ctor_table(_xi_start, _xi_end);
+    _run_ctor_table(_xc_start, _xc_end);
+
     if (__CTOR_LIST__ && __CTOR_END__) {
         init_fn *list = __CTOR_LIST__;
         size_t n = 0;
@@ -205,7 +235,7 @@ static void _run_ctors(void)
     }
 }
 
-/* ---------- Wide-string helpers ---------- */
+/* ---------- Wide helpers ---------- */
 static size_t _wlen(const WCHAR *p)
 {
     size_t n = 0;
@@ -213,19 +243,13 @@ static size_t _wlen(const WCHAR *p)
     return n;
 }
 
-/* Return TRUE if s starts with an argv[0]-shaped token (optionally
- * quoted).  Used to detect whether GetCommandLineW() already
- * contains the program name on the given CE version. */
 static int _has_program_token(const WCHAR *s)
 {
-    if (!s || !*s) return FALSE;
+    if (!s) return FALSE;
     while (*s == L' ' || *s == L'\t') s++;
     return *s != L'\0';
 }
 
-/* Walk past argv[0] in the raw command-line string, using the same
- * quote/backslash rules as the parser.  Returns a pointer to the
- * first whitespace/separator after argv[0]. */
 static const WCHAR *_scan_past_argv0(const WCHAR *s)
 {
     if (!s) return s;
@@ -258,24 +282,7 @@ static const WCHAR *_scan_past_argv0(const WCHAR *s)
     return s;
 }
 
-/* ---------- CommandLineToArgvW-compatible parser ----------
- *
- * Returns a LocalAlloc'd NULL-terminated array of LocalAlloc'd wide
- * strings and sets *out_argc.  cmd is used as the source; if cmd is
- * NULL or empty, prefix_progname is used as argv[0] (this handles
- * the case where GetCommandLineW() returns L"" because the loader
- * did not prepend the program name -- some CE 4/5 configurations).
- *
- * Rules:
- *   - Arguments are separated by space/tab.
- *   - "..." quotes group spaces.
- *   - Backslashes are literal unless immediately before ", per the
- *     2N/2N+1 rule:
- *         2n   \ + " -> n backslashes + begin/end quote;
- *         2n+1 \ + " -> n backslashes + literal ".
- *   - "" inside a quoted region -> one literal " (no toggle out of
- *     quote) -- matches CommandLineToArgvW behaviour on XP+.
- */
+/* ---------- CommandLineToArgvW-compatible parser ---------- */
 static WCHAR **_parse_cmdline(const WCHAR *cmd, const WCHAR *prefix_progname,
                               int *out_argc)
 {
@@ -286,10 +293,6 @@ static WCHAR **_parse_cmdline(const WCHAR *cmd, const WCHAR *prefix_progname,
     size_t cmd_len = _wlen(cmd);
 
     if (prefix_progname && prefix_progname[0]) {
-        /* Prepend "<progname> " to the command line so the parser
-         * always produces argv[0] = program path.  We allocate a
-         * temporary buffer from the process heap (LocalAlloc), run
-         * the parser on the concatenation, then free it. */
         prefix_len = _wlen(prefix_progname);
         SIZE_T buf_bytes = sizeof(WCHAR) * (SIZE_T)(prefix_len + 1 + cmd_len + 1);
         WCHAR *buf = (WCHAR *)LocalAlloc(LPTR, buf_bytes);
@@ -301,7 +304,6 @@ static WCHAR **_parse_cmdline(const WCHAR *cmd, const WCHAR *prefix_progname,
         source = buf;
         prefix_copy = buf;
     } else if (!cmd || !cmd[0]) {
-        /* Empty command line, no prefix: argv = { "" }. */
         SIZE_T argv_bytes = sizeof(WCHAR *) * 2;
         WCHAR **argv = (WCHAR **)LocalAlloc(LPTR, argv_bytes);
         if (!argv) { *out_argc = 0; return NULL; }
@@ -314,7 +316,7 @@ static WCHAR **_parse_cmdline(const WCHAR *cmd, const WCHAR *prefix_progname,
         source = cmd;
     }
 
-    /* First pass: count args. */
+    /* Count. */
     int n = 0, in_q = 0;
     const WCHAR *s = source;
     while (*s) {
@@ -343,13 +345,10 @@ static WCHAR **_parse_cmdline(const WCHAR *cmd, const WCHAR *prefix_progname,
     WCHAR **argv = (WCHAR **)LocalAlloc(LPTR, argv_bytes);
     if (!argv) { if (prefix_copy) LocalFree(prefix_copy); *out_argc = 0; return NULL; }
 
-    WCHAR *buf = (WCHAR *)LocalAlloc(LPTR, sizeof(WCHAR) *
-                        (SIZE_T)(_wlen(source) + 2));
-    if (!buf) {
-        LocalFree(argv);
-        if (prefix_copy) LocalFree(prefix_copy);
-        *out_argc = 0; return NULL;
-    }
+    size_t src_len = _wlen(source);
+    WCHAR *buf = (WCHAR *)LocalAlloc(LPTR, sizeof(WCHAR) * (SIZE_T)(src_len + 2));
+    if (!buf) { LocalFree(argv); if (prefix_copy) LocalFree(prefix_copy);
+                *out_argc = 0; return NULL; }
 
     int a = 0; in_q = 0; s = source;
     while (*s && a < n) {
@@ -399,7 +398,17 @@ static WCHAR **_parse_cmdline(const WCHAR *cmd, const WCHAR *prefix_progname,
     return argv;
 }
 
-/* ---------- Wide -> narrow conversion for __argv/_acmdln ---------- */
+/* ---------- Wide -> narrow conversion ---------- */
+static wctomb_t _pWctomb = NULL;
+
+static void _resolve_wctomb(void)
+{
+    if (_pWctomb) return;
+    HMODULE core = GetModuleHandleW(L"coredll.dll");
+    if (!core) return;
+    _pWctomb = (wctomb_t)(INTPTR_T)GetProcAddress(core, "WideCharToMultiByte");
+}
+
 static char *_w2n_one(const WCHAR *w)
 {
     size_t l = _wlen(w);
@@ -415,7 +424,6 @@ static char *_w2n_one(const WCHAR *w)
             }
         }
     }
-    /* Fallback. */
     nb = (char *)LocalAlloc(LPTR, (SIZE_T)l + 1);
     if (nb) {
         for (size_t k = 0; k < l; k++)
@@ -435,34 +443,28 @@ static char **_w2n(WCHAR **wv, int argc)
     return a;
 }
 
-/* ---------- Runtime initialisation ---------- */
+/* ---------- Initialisation ---------- */
 static void _init_runtime(void)
 {
     _resolve_wctomb();
-
     HINSTANCE hinst = (HINSTANCE)GetModuleHandleW(NULL);
+    (void)hinst;
     _wcmdln = GetCommandLineW();
 
-    /* Query the executable path from the OS; used as argv[0] when
-     * the raw command line does not already include it (CE 4/5
-     * launcher behaviour varies). */
     static WCHAR kModName[MAX_PATH];
     kModName[0] = L'\0';
-    if (hinst) {
-        DWORD len = GetModuleFileNameW(hinst, kModName, MAX_PATH);
+    {
+        DWORD len = GetModuleFileNameW((HMODULE)hinst, kModName, MAX_PATH);
         if (len >= MAX_PATH) len = MAX_PATH - 1;
         kModName[len] = L'\0';
     }
 
     const WCHAR *prefix = NULL;
-    if (!_has_program_token(_wcmdln) && kModName[0]) {
+    if (!_has_program_token(_wcmdln) && kModName[0])
         prefix = kModName;
-    }
+
     __wargv = _parse_cmdline(_wcmdln ? _wcmdln : L"", prefix, &__argc);
 
-    /* Compute _wcmdtail by scanning _wcmdln past the argv[0] token
-     * (or starting from position 0 if argv[0] was synthesised from
-     * GetModuleFileNameW). */
     const WCHAR *tail_src = _wcmdln ? _wcmdln : L"";
     if (!prefix && _has_program_token(tail_src)) {
         const WCHAR *p = tail_src;
@@ -471,10 +473,7 @@ static void _init_runtime(void)
         while (*p == L' ' || *p == L'\t') p++;
         _wcmdtail = (WCHAR *)(INTPTR_T)p;
     } else {
-        _wcmdtail = (WCHAR *)(INTPTR_T)tail_src;
-        /* If prefix was prepended the raw _wcmdln may still be "";
-         * point tail at its NUL terminator. */
-        if (!_wcmdln || !*_wcmdln) _wcmdtail = (WCHAR *)(INTPTR_T)L"";
+        _wcmdtail = (WCHAR *)(INTPTR_T)L"";
     }
 
     __argv = _w2n(__wargv, __argc);
@@ -482,54 +481,59 @@ static void _init_runtime(void)
     _run_ctors();
 }
 
-/* ---------- Forward-declared entry point prototypes ---------- */
-void USED WINAPI WinMainCRTStartup(void);
-void USED WINAPI wWinMainCRTStartup(void);
-void USED WINAPI mainCRTStartup(void);
-void USED WINAPI mainWCRTStartup(void);
-void USED WINAPI mainACRTStartup(void);
+/* ---------- Handoff to libc exit, with ExitProcess fallback ---------- */
+static void NORETURN _exit_to_os(int rc)
+{
+    if (exit) {
+        exit(rc);
+        /* Unreachable if libc is correct; fall through otherwise. */
+    }
+    for (;;) { ExitProcess((UINT)rc); }
+}
 
-static void NORETURN _entry_wide_gui(HINSTANCE hinst, int is_wide_winmain)
+/* ---------- Entry point forward declarations + definitions ---------- */
+void USED WINAPI AKARI_ENTRY("WinMainCRTStartup")  WinMainCRTStartup(void);
+void USED WINAPI AKARI_ENTRY("wWinMainCRTStartup") wWinMainCRTStartup(void);
+void USED WINAPI AKARI_ENTRY("mainCRTStartup")     mainCRTStartup(void);
+void USED WINAPI AKARI_ENTRY("mainWCRTStartup")    mainWCRTStartup(void);
+void USED WINAPI AKARI_ENTRY("mainACRTStartup")    mainACRTStartup(void);
+
+static void NORETURN _entry_gui(HINSTANCE hinst, int prefer_wide)
 {
     _init_runtime();
     LPWSTR tail = _wcmdtail ? _wcmdtail : (LPWSTR)L"";
-    int rc;
-    if (is_wide_winmain) {
-        int WINAPI (*wm)(HINSTANCE, HINSTANCE, LPWSTR, int) =
-            wWinMain ? wWinMain
-            : (WinMain ? WinMain : _dflt_WinMain);
-        rc = wm(hinst, (HINSTANCE)0, tail, SW_SHOW);
+    winmain_t wm = NULL;
+    if (prefer_wide) {
+        if (wWinMain) wm = (winmain_t)wWinMain;
+        else if (WinMain) wm = (winmain_t)WinMain;
+        else wm = (winmain_t)_dflt_WinMain;
     } else {
-        int WINAPI (*wm)(HINSTANCE, HINSTANCE, LPWSTR, int) =
-            WinMain ? WinMain : _dflt_WinMain;
-        rc = wm(hinst, (HINSTANCE)0, tail, SW_SHOW);
+        if (WinMain) wm = (winmain_t)WinMain;
+        else if (wWinMain) wm = (winmain_t)wWinMain;
+        else wm = (winmain_t)_dflt_WinMain;
     }
-    exit(rc);
-    for (;;) { }
+    int rc = wm(hinst, (HINSTANCE)0, tail, SW_SHOW);
+    _exit_to_os(rc);
 }
 
 void USED WINAPI AKARI_ENTRY("WinMainCRTStartup") WinMainCRTStartup(void)
 {
-    HINSTANCE hinst = (HINSTANCE)GetModuleHandleW(NULL);
-    _entry_wide_gui(hinst, /*is_wide_winmain=*/0);
+    _entry_gui((HINSTANCE)GetModuleHandleW(NULL), /*prefer_wide=*/0);
 }
 
 void USED WINAPI AKARI_ENTRY("wWinMainCRTStartup") wWinMainCRTStartup(void)
 {
-    HINSTANCE hinst = (HINSTANCE)GetModuleHandleW(NULL);
-    _entry_wide_gui(hinst, /*is_wide_winmain=*/1);
+    _entry_gui((HINSTANCE)GetModuleHandleW(NULL), /*prefer_wide=*/1);
 }
 
 void USED WINAPI AKARI_ENTRY("mainCRTStartup") mainCRTStartup(void)
 {
     _init_runtime();
-    /* envp is NULL on Windows CE. */
     int rc;
     if (main)       rc = main(__argc, __argv, (char **)0);
     else if (wmain) rc = wmain(__argc, __wargv, (WCHAR **)0);
     else            rc = 0;
-    exit(rc);
-    for (;;) { }
+    _exit_to_os(rc);
 }
 
 void USED WINAPI AKARI_ENTRY("mainWCRTStartup") mainWCRTStartup(void)
@@ -539,8 +543,10 @@ void USED WINAPI AKARI_ENTRY("mainWCRTStartup") mainWCRTStartup(void)
     if (wmain)      rc = wmain(__argc, __wargv, (WCHAR **)0);
     else if (main)  rc = main(__argc, __argv, (char **)0);
     else            rc = 0;
-    exit(rc);
-    for (;;) { }
+    _exit_to_os(rc);
 }
 
-void USED WINAPI AKARI_ENTRY("mainACRTStartup") mainACRTStartup(void) { mainCRTStartup(); }
+void USED WINAPI AKARI_ENTRY("mainACRTStartup") mainACRTStartup(void)
+{
+    mainCRTStartup();
+}
