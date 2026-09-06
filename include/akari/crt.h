@@ -31,10 +31,11 @@ extern int              __argc;
 extern char           **__argv;
 extern wchar_t        **__wargv;
 extern char            *_acmdln;     /* narrow command tail (argv[0]) */
-extern wchar_t         *_wcmdln;     /* wide command line as returned by GetCommandLineW() */
-extern int              _fmode;      /* default file translation mode */
-extern int              _doserrno;   /* O.S. error mapping */
-extern int              _commode;    /* default commit-on-write flag */
+extern wchar_t         *_wcmdln;     /* full wide command line (GetCommandLineW result) */
+extern wchar_t         *_wcmdtail;   /* pointer into _wcmdln right after argv[0] -- WinMain's lpCmdLine */
+extern int              _fmode;      /* default file translation mode (O_BINARY is CE default; compat only) */
+extern int              _doserrno;   /* O.S. error mapping (errno <-> GetLastError), maintained by libc */
+extern int              _commode;    /* default commit-on-write flag for _fdopen/_setmode */
 
 #ifdef __cplusplus
 }
