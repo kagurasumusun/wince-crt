@@ -1,161 +1,141 @@
-# Akari CRT (明かり) — a clean-room Windows CE C runtime
+# Akari CRT (明かり) — Windows CE startup / ABI glue for Clang/LLVM
 
-Akari is a from-scratch C/C++ runtime targeting **Windows CE on ARM
-(ARMv7 Thumb, PE/COFF, subsystem 9)**. It is designed to replace
-cegcc's `mingwrt`/`w32api` stack with an **LLVM/Clang/lld-only**
-toolchain, producing binaries that import `coredll.dll` — the single
-system DLL on Windows CE that combines the roles of kernel32, advapi32,
-and msvcrt.
+Akari is a **minimal CRT (C Runtime) glue layer** for compiling C/C++
+programs with LLVM/Clang/lld and running them on **Windows CE (ARM
+Thumb, PE/COFF, subsystem 9)**.
 
-> **Akari (明かり)** is Japanese for "light" — a small, bright CRT
-> for tiny ARM devices.
+This repository is **NOT a C standard library** and **NOT a WinCE SDK**.
+It supplies only the glue necessary to get a Clang-generated PE binary
+from its entry point to the user's `main`/`WinMain`/`wWinMain` with
+C++ static constructors run, thread-safe `errno`, atexit handlers, and
+the MSVCRT-visible global symbols that compiled code expects.
 
-This implementation is **100% clean-room** (see § *Clean-room status*)
-and is distributed under the terms of the MIT license.
+You bring:
 
----
+- The **C/C++ standard library** (e.g. llvm-libc, newlib, musl, or the
+  msvcrt-compatible exports already present in `coredll.dll`).
+- The **WinCE SDK headers / import library** (`windows.h`, `coredll.lib`,
+  etc.). Those describe the Win32 surface; Akari does not.
 
-## Status
+> **Akari (明かり)** is Japanese for "light" — a small, bright glue
+> layer between Clang's output and the CE kernel.
 
-Feature set is at parity with, and in several places exceeds, the
-cegcc `mingwrt` runtime:
-
-| Area                       | Status |
-|----------------------------|--------|
-| Startup: `WinMainCRTStartup`, `wWinMainCRTStartup`, `mainCRTStartup`, `_DllMainCRTStartup` | ✅ |
-| C++ `.init_array`/`.ctors`/`.fini_array` constructor dispatch | ✅ |
-| Command-line parsing (`GetCommandLineW` → `__argc`/`__argv`/`__wargv`) | ✅ |
-| Thread-local `errno` via `TlsAlloc`/`TlsGetValue` | ✅ |
-| Memory (`malloc`/`calloc`/`realloc`/`free` over `LocalAlloc/LocalFree`) | ✅ |
-| String / memory (`mem*`, `str*`, `stpcpy`, `strnlen`, `strndup`, `strrev`, `strset`, `bzero`/`bcopy`/`bcmp`) | ✅ |
-| Wide strings (`wcslen`, `wcscpy`, `wmemcpy`, `wmemcmp`, `mbstowcs`, `wcstombs`) | ✅ |
-| Wide numeric conversions (`wcstol`, `wcstoul`, `wcstoll`, `wcstoull`, `wcstod`) | ✅ |
-| Numeric conversions (`strtol`, `strtoul`, `strtoll`, `strtoull`, `strtod`, `itoa`, `utoa`, `ltoa`, `ultoa`, `atoi`, `atol`, `atof`) | ✅ |
-| `<stdio.h>` full buffered streams (`fopen`, `fclose`, `fread`, `fwrite`, `fgetc`, `fputc`, `ungetc`, `fgets`, `fputs`, `fseek`, `ftell`, `fflush`, `setvbuf`, `fdopen`, `freopen`, `perror`, `puts`, etc.) | ✅ |
-| `printf`/`fprintf`/`sprintf`/`snprintf` family (`%d %s %c %x %o %u %ld %p %%)` | ✅ |
-| Wide print: `wprintf`/`fwprintf`/`swprintf` (buffered wide FILE backend is routed through narrow char path on CE's `OutputDebugStringA`) | ✅ |
-| Scanf family (`sscanf`, basic conversions) | ✅ |
-| `stdout`/`stderr` routed to `OutputDebugStringA` with line buffering on CE | ✅ |
-| C runtime math (`fabs`, `floor`, `ceil`, `fmod`, `sqrt`, `pow`, `sin`, `cos`, `exp`, `log`, `fmin`, `fmax`, `copysign`, `trunc`, `round`) | ✅ |
-| `<ctype.h>` / `<wctype.h>` (`is*`, `to*`, `isw*`, `tow*`) | ✅ |
-| `<time.h>` (`time`, `clock`, `tm`, `mktime`, `localtime`, `gmtime`, `strftime` baseline) | ✅ |
-| `<stdlib.h>` (`qsort`, `bsearch`, `rand`, `abs`, `labs`, `llabs`, `div`, `ldiv`, `lldiv`, `abort`, `exit`, `atexit`, `getenv`, `system` stub) | ✅ |
-| MSVCRT ABI shims (`__iob_func`, `__p___argv`, `__p___argc`, `_acmdln`, `_initterm`, `_initterm_e`) | ✅ |
-| C++ operator `new`/`delete` (MS-mangled ??2/??3 + Itanium _Znwj/_ZdlPv aliases) | ✅ |
-| C++ EH personality stubs (`__CxxFrameHandler3`, `_CxxThrowException`, `__RTDynamicCast`, `_abnormal_termination`, `_purecall`) | ✅ |
-| Stack-chk guard, `__chkstk`, safe SEH `.pdata`/`.xdata` EH records (lld-processed) | ✅ |
-| POSIX-compat shims (`open`, `close`, `read`, `write`, `lseek`, `unlink`, `access`, `isatty`, `dup`, etc.) — return failure on CE for portability | ✅ |
-| PE/COFF linker script with ARM EH unwind tables, C++ ctor/dtor arrays, stack/heap size symbols | ✅ |
-| `coredll.dll` import library source (`.def` + `llvm-dlltool`) | ✅ |
-
-### Not yet implemented (planned / stretch)
-
-* Float `%e`/`%g` formatting in `printf` (currently integer/string/hex only).
-* `wscanf` family.
-* Full C++ exception personality dispatch (stub is present to satisfy the linker, but try/catch will abort).
-* `mips`, `sh`, `x86` secondary arch startup assembly (only `arm` is wired up in `ldscripts/arm-wince.ld`; setjmp stubs exist).
+Clean-room MIT-licensed implementation; see §*Clean-room status*.
 
 ---
 
-## Building
+## What Akari provides
 
-Toolchain required: **LLVM/Clang/lld** built for ARM Windows targets.
-The project is tuned for the [`kagurasumusun/llvm-project`](https://github.com/kagurasumusun/llvm-project) fork, which adds correct Windows-on-ARM (`thumbv7-unknown-windows-gnu`) code generation and an `ld.lld` that produces PE/CE subsystem-9 binaries.
+| Component | File | Purpose |
+|-----------|------|---------|
+| EXE startup | `src/crt/crt0.c` | `WinMainCRTStartup` / `wWinMainCRTStartup` / `mainCRTStartup`: TLS/errno init, `.init_array` / `.ctors` dispatch, `GetCommandLineW()` parsing → `__argc`/`__argv`/`__wargv`/`_acmdln`, call user entry point, `exit` → `ExitProcess`. |
+| DLL startup | `src/crt/dllcrt.c` | `_DllMainCRTStartup`: per-process init, `DisableThreadLibraryCalls`, call constructors, dispatch to user `DllMain`. |
+| atexit | `src/misc/atexit.c` | `atexit`, `_onexit`, `__cxa_atexit` (minimal), `_akari_atexit_init/_fini`. |
+| errno | `src/misc/errno.c` | Thread-local errno via `TlsAlloc`/`TlsGetValue`; `_errno()` accessor matching MSVCRT. |
+| exit | `src/misc/exit.c` | `exit`, `_exit`, `_Exit`, `abort` → `coredll!ExitProcess`. |
+| MSVCRT globals | `src/misc/globals.c` | `__argc`, `__argv`, `__wargv`, `_acmdln`, `_fmode`, `_doserrno`, `__iob_func`, `__p___argv`, `_initterm`/`_initterm_e`, `__imp___*`. |
+| C++ glue | `src/crt/crt_cpp.c` | `operator new`/`delete` (`??2`/`??3`/`??_U`/`??_V` + Itanium aliases), `__CxxFrameHandler3` stubs, `__cxa_guard_*`, `__RTDynamicCast`, `_purecall`, stack-chk guard. |
+| Import thunks | `src/crt/patchables.c` | `__imp_malloc`/`__imp_free` absolute-import pointers. |
+| ARM helpers | `src/compiler-rt/` | `__chkstk` (ARM stack probe), `__aeabi_idivmod` (needed by some CE targets). |
+
+What Akari **deliberately does not provide**:
+
+- Anything from `<stdio.h>`, `<string.h>`, `<stdlib.h>`, `<math.h>`,
+  `<ctype.h>`, `<time.h>`, `<wchar.h>`, etc. That is libc's job.
+- `windows.h`, `windef.h`, `winbase.h`, or any Win32 API signature
+  beyond the handful of coredll entry points Akari itself calls.
+- `coredll.lib` / `.def` import library.
+- A linker script. PE subsystem selection is done via
+  `-Wl,-subsystem:windowsce:9.0`; section placement is lld's job. A
+  sample `ldscripts/arm-wince.ld` ships in `samples/` for reference.
+
+---
+
+## Building & linking
+
+Toolchain: **clang + lld + llvm-ar** from LLVM, targeting
+`thumbv7-unknown-windows-gnu` (the ARM Windows PE target that ships in
+the `kagurasumusun/llvm-project` fork).
 
 ```sh
-# Default ARM Windows CE target
 make CROSS=armv7-wince-
-
-# Static library + startup objects are placed under build/
-#   build/libakari.a        static CRT
-#   build/akari_crt0.o      WinMainCRTStartup
-#   build/akari_crt0w.o     wWinMainCRTStartup
-#   build/akari_crt0c.o     mainCRTStartup
-#   build/akari_dllcrt.o    _DllMainCRTStartup
-#   build/coredll.lib       coredll.dll import library (from src/coredll.def)
 ```
 
-Install into a sysroot with:
-```sh
-make PREFIX=/opt/akari-sysroot install
+produces:
+
+```
+build/libakari.a
+build/akari_crt0.o    # WinMainCRTStartup
+build/akari_crt0w.o   # wWinMainCRTStartup
+build/akari_crt0c.o   # mainCRTStartup
+build/akari_dllcrt.o  # _DllMainCRTStartup
 ```
 
-### Host-side smoke test
+Install with `make PREFIX=/path/to/sysroot install`.
 
-To verify the portable routines without an ARM toolchain:
+### Typical link line (user application)
 
 ```sh
-make hostcheck   # compile every non-platform source with host gcc
-make test        # link a freestanding self-test binary (raw Linux syscalls, no libc)
-                 # and run it. Reports  "N ok, 0 failed".
+clang --target=thumbv7-unknown-windows-gnu -fshort-wchar -mthumb \
+      -nostdlib -fuse-ld=lld \
+      -I<your-sdk>/include \
+      -Wl,-subsystem:windowsce:9.0 \
+      -Wl,-entry:WinMainCRTStartup \
+      your_code.o \
+      <path>/akari_crt0.o -L<path> -lakari \
+      -L<your-sdk>/lib -lcoredll -lyourlibc -o your.exe
 ```
 
-The self-test currently reports **216 ok / 0 failed** covering:
+`-lcoredll` is the OS import library; `-lyourlibc` is whatever C library
+you have chosen to target CE (coredll's built-in msvcrt-exports, a
+newlib port, llvm-libc, …). Akari calls into malloc/free/LocalAlloc/
+ExitProcess/GetCommandLineW/… — all resolved from those libraries at
+link time.
 
-* mem/str/wcs, malloc, strto* family, qsort/bsearch, rand
-* printf/sprintf/snprintf, sscanf
-* abs/labs/llabs, div/ldiv/lldiv, itoa
-* ctype & wctype, mbstowcs/wcstombs
-* strnlen, stpcpy, strndup, strrev, strset
-* bzero, bcopy, bcmp
-* wmemcpy, wmemcmp, wcstol/wcstoul/wcstod
-* fmin/fmax/copysign/trunc/round/sqrt
-* setlocale/localeconv
-* **full buffered FILE I/O on host backend**: `fopen`, `fwrite`, `fread`, `fclose`, `fseek`, `ftell`, `ungetc`, `feof`, `fputs`, `fputc`, `fileno`, `sprintf`.
+### Host-side sanity check
+
+```sh
+make hostcheck
+```
+
+compiles every Akari translation unit with the host `gcc` (warning-free)
+and archives them into `build/host/libakari.a`. This is a build-only
+smoke test; Akari does not ship functional runtime tests because the
+code paths it touches are inherently platform-specific (PE entry, TLS,
+coredll calls).
 
 ---
 
 ## Repository layout
 
 ```
-include/        Public CRT headers (drop-in for msvcrt/cegcc-style headers)
-  akari/        Compiler/windef/winnt shims & internal macros
-ldscripts/      lld linker scripts (arm-wince.ld)
-src/
-  crt/          Program startup (crt0.c, dllcrt.c) and C++ support stubs
-  ctype/        <ctype.h>, <wctype.h>
-  math/         <math.h> soft-float fallbacks
-  misc/         atexit, errno, exit, locale, signal, globals, mbstring, hoststubs
-  stdio/        FILE*, printf, scanf, wide print, posix I/O shims
-  stdlib/       malloc, strto*, qsort/bsearch, rand, abs, itoa, env, search, wcsto
-  string/       <string.h>, <wchar.h> string routines
-  time/         <time.h>
-  compiler-rt/  __aeabi_idivmod, __udivmodsi4, __chkstk (ARM)
-  setjmp/       setjmp/longjmp assembly per-arch
-src/coredll.def Import-library definition for coredll.dll
-tests/          Host-side self-test
+include/akari/compiler.h   Compiler macros (NORETURN/WEAK/WINAPI/...).
+include/akari/crt.h        Declarations of MSVCRT-ABI symbols Akari exports.
+src/crt/                   Startup + C++ ABI glue.
+src/misc/                  atexit, errno, exit, MSVCRT globals.
+src/compiler-rt/           __chkstk, __aeabi_idivmod (ARM).
+samples/ldscripts/         Reference arm-wince.ld for lld (not required).
 ```
 
 ---
 
 ## Clean-room status
 
-Akari is written **from scratch**. None of the code in this repository
-is derived from, copied from, or transliterated from any other C
-runtime, including:
+Akari is written from scratch. No code from mingwrt/w32api/cegcc/
+newlib/glibc/musl/MSVCRT or any other C runtime was copied, adapted,
+or referenced during implementation. Information sources used were
+limited to:
 
-* msvcrt.dll
-* the Mingw-w64 / mingwrt / w32api projects
-* cegcc
-* newlib, glibc, dietlibc, musl
-* Microsoft's published CRT sources
-
-Public information was used **only** to determine:
-
-* Function signatures and expected behaviour (from ISO C99/C11 and
-  public Microsoft documentation: learn.microsoft.com).
-* Ordinal/name exports of `coredll.dll` needed for binary
-  compatibility (from public SDK `.def` files and documentation).
-* The PE/COFF `.pdata`/`.xdata` ARM exception-table layout (from
-  Microsoft's public ARM exception-handling specification, and
-  lld's own source for how it sorts these sections).
-
-No source code from any third-party project was consulted during
-implementation. If you find a place where behaviour matches another
-CRT, it is because both follow the same specification.
+- ISO C99/C11 and the C++ Itanium ABI specification.
+- Microsoft's public ARM64/ARM exception handling documentation for
+  `.pdata`/`.xdata` (https://learn.microsoft.com/cpp/build/arm-exception-handling).
+- The MS-PE specification and lld's own PE/COFF handling (LLVM review
+  D82883), used to confirm that .pdata is sorted automatically.
+- Publicly documented coredll.dll exports (ordinal lists) sufficient to
+  know which entry points to declare.
 
 ## License
 
-MIT. See the copyright notice at the top of each source file.
+MIT — see copyright notice at the top of each source file.
 
 &copy; 2026 Akari CRT contributors.
