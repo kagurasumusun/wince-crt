@@ -1,0 +1,73 @@
+; coredll.def -- Import description for Windows CE coredll.dll
+; This covers the CRT-relevant surface plus common OS primitives.
+; Copyright (c) 2026 Akari CRT contributors  (SPDX-License-Identifier: MIT)
+
+LIBRARY coredll.dll
+EXPORTS
+    ; CRT memory
+    LocalAlloc
+    LocalReAlloc
+    LocalFree
+    LocalSize
+    GetProcessHeap
+    HeapAlloc
+    HeapReAlloc
+    HeapFree
+    GetLastError
+    SetLastError
+
+    ; process/thread
+    ExitProcess
+    Sleep
+    GetModuleHandleW
+    GetModuleHandleA
+    GetCommandLineW
+    OutputDebugStringW
+    OutputDebugStringA
+    DebugBreak
+    FatalExit
+    GetCurrentProcessId
+    GetCurrentThreadId
+
+    ; file I/O
+    CreateFileW
+    CreateFileA
+    ReadFile
+    WriteFile
+    CloseHandle
+    SetFilePointer
+    GetFileSize
+    SetEndOfFile
+    GetStdHandle
+
+    ; time
+    GetSystemTime
+    GetTickCount
+
+    ; dynamic library
+    GetProcAddress
+    LoadLibraryW
+    FreeLibrary
+
+    ; threads/sync
+    CreateThread
+    WaitForSingleObject
+    CreateEventW
+    SetEvent
+    ResetEvent
+    InitializeCriticalSection
+    DeleteCriticalSection
+    EnterCriticalSection
+    LeaveCriticalSection
+    TryEnterCriticalSection
+    TlsAlloc
+    TlsFree
+    TlsGetValue
+    TlsSetValue
+
+    ; GUI
+    MessageBoxW
+    MessageBoxA
+
+    ; ANSI/wide helpers - not present on every CE version; listed for safety
+    ; These are usually provided by our own shims.

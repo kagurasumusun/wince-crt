@@ -1,0 +1,14 @@
+/build/
+*.o
+*.a
+*.obj
+*.lib
+*.exe
+*.dll
+*.pdb
+*.ilk
+*~
+.DS_Store
+build/
+*.o
+akari_selftest
