@@ -12,11 +12,17 @@
  * the "/ENTRY (Windows CE 5.0)" documentation), so there is no
  * @12-decorated x86 variant to provide.
  *
- * The linker's default DLL-entry search (lld, windows-gnu flavour)
- * first looks for the unadorned "DllMainCRTStartup"; a one-line
- * wrapper provides that spelling and forwards to the canonical
- * function, so linking a DLL without an explicit /entry works on all
- * CE architectures.
+ * The linker's default DLL-entry search (lld-link -wince) resolves
+ * the unadorned "DllMainCRTStartup" spelling on non-x86 targets
+ * (verified on arm-pc-wince); on 32-bit x86 lld's default search
+ * uses the desktop stdcall-decorated spelling (__DllMainCRTStartup@12),
+ * which Windows CE deliberately does not use -- x86 CE DLL links must
+ * pass an explicit /entry:DllMainCRTStartup (lld decorates the plain
+ * name with a leading underscore on x86, which the alias below
+ * provides; spelling the name with a leading underscore would
+ * double-decorate it and fail).  A one-line wrapper provides the
+ * unadorned spelling on every CE architecture, so linking a DLL
+ * without an explicit /entry works there.
  *
  * Runtime behavior follows Microsoft's "Run-time Library Behavior
  * (Windows CE 5.0)" documentation:

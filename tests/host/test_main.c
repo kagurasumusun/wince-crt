@@ -261,6 +261,38 @@ static void run_module_path_vector(void)
     g_modpath = (const akari_wchar *) 0;
 }
 
+static void run_empty_no_path_vector(void)
+{
+    /* Empty command line AND GetModuleFileNameW failure: the module
+     * path fallback has nothing to use; the documented behavior is a
+     * single empty argv[0] (argc == 1). */
+    static const akari_wchar empty0[] = { 0 };
+
+    g_modpath = (const akari_wchar *) 0;
+    set_cmdline("");
+    __argc = 0;
+    __argv = NULL;
+    __wargv = NULL;
+    akari_init_args();
+    check(__argc == 1, "empty line (no path) argc == 1");
+    check(__wargv && __wargv[0] != NULL && wseq(__wargv[0], empty0),
+          "empty line (no path) argv0 == empty string");
+    check(__argv && __argv[0] && __argv[0][0] == '\0',
+          "empty line (no path) narrow argv0 == empty string");
+}
+
+static void run_null_cmdline_vector(void)
+{
+    /* GetCommandLineW returning NULL (broken OS image): init returns
+     * without touching the argument objects; argc stays 0. */
+    g_cmdline = (akari_wchar *) 0;
+    __argc = 0;
+    __argv = NULL;
+    __wargv = NULL;
+    akari_init_args();
+    check(__argc == 0, "NULL command line: argc stays 0");
+}
+
 static void run_lossy_vector(void)
 {
     /* 0xE9 is not 7-bit: the documented CRT fallback maps it to '?';
@@ -304,12 +336,17 @@ int main(void)
     const char *const v10[] = { "C:\\dir\\file.exe", "-x", NULL };
     const char *const v11[] = { "app", "with   spaces  inside", NULL };
     const char *const v12[] = { "ab", NULL };
+    const char *const v13[] = { "app", "a", NULL }; /* trailing ws ignored */
+    const char *const v14[] = { "app", "", "x", NULL }; /* empty arg between */
+    const char *const v15[] = { "ab", "x", NULL };  /* quotes toggle mid-token */
 
     /* Fallback path first (the resolver has not run yet), so both
      * converter modes are covered; every later init retries the
      * resolver because a failed resolution is not cached. */
     run_lossy_vector();
     run_module_path_vector();
+    run_empty_no_path_vector();
+    run_null_cmdline_vector();
 
     run_vector("app.exe a b c", " a b c", v1);
     run_vector("\"a b c\" d e", " d e", v2);
@@ -324,6 +361,9 @@ int main(void)
     run_vector("app \"with   spaces  inside\"", " \"with   spaces  inside\"",
                v11);
     run_vector("a\"b", "", v12);             /* unterminated quote */
+    run_vector("app a   ", " a", v13);       /* trailing ws ignored */
+    run_vector("app \"\" x", " \"\" x", v14);/* empty quoted arg between */
+    run_vector("a\"\"b x", " x", v15);       /* quotes toggle mid-token */
 
     if (failures) {
         fprintf(stderr, "hosttest: %d/%d checks FAILED\n", failures,

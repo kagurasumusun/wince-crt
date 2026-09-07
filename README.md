@@ -43,7 +43,7 @@ WinCE driver.
 | Command-line parse into `__argc`/`__argv`/`__wargv`, `_wcmdtail` for `WinMain`'s `lpCmdLine`, per the documented MS parsing rules | **Akari** (clean-room parser; imports `GetCommandLineW`) | ✅ |
 | Narrow `__argv`/`_acmdln`: `WideCharToMultiByte(CP_ACP)` resolved at runtime, lossy 7-bit fallback when the converter is absent from the OS image | **Akari** | ✅ |
 | MSVCRT-model data globals `__argc __argv __wargv _acmdln _wcmdln _wcmdtail _fmode _doserrno _commode __dso_handle` (coredll exports no data objects) | **Akari** (`libakari.a`) | ✅ |
-| C/C++ initializers: `.CRT$XI*` / `.CRT$XC*` (clang-cl objects) first-to-last, then the `.ctors` list (`__CTOR_LIST__`); destructors from the `.dtors` list | **Akari** | ✅ |
+| C/C++ initializers: `.CRT$XI*` / `.CRT$XC*` (MS-style objects) first-to-last, then the `.ctors` list (`__CTOR_LIST__`); destructors from the `.dtors` list | **Akari** | ✅ |
 | Weak user-entry fallbacks (`DllMain` default in the DLL object; missing `main`/`WinMain` detected at runtime) | **Akari** | ✅ |
 | x86 `___main` hook (only i686 `windows-gnu` clang makes `main()` call it; here it is a no-op because entry points already ran constructors) | **Akari** | ✅ |
 | Process exit: call the C library's `exit()` when one is linked (atexit/`__cxa_finalize`/stdio flush happen there); direct `TerminateProcess` on the current process only as a no-libc fallback (coredll exports no `ExitProcess` on any CE generation) | **Akari** (just the call) | ✅ |
@@ -258,20 +258,32 @@ bookkeeping is needed.  The walkers tolerate a list that starts
 directly with a real entry, skipping the `-1` only when it is actually
 present at `l[0]`.
 
-Objects compiled in MS style (clang-cl) place initializer pointers in
-`.CRT$XI*`/`.CRT$XC*` sections instead.  Microsoft documents that its
-linker combines these subsections in the order of the part after `$`
-("CRT initialization", Microsoft Learn), so user entries in
+Objects compiled in MS style (code that allocates
+`.CRT$XI*`/`.CRT$XC*` sections, e.g. `__declspec(allocate(...))`, or
+objects from MS-compatible toolchains) place initializer pointers in
+those sections instead.  Microsoft documents that its linker combines
+these subsections in the order of the part after `$` ("CRT
+initialization", Microsoft Learn), so user entries in
 `.CRT$XCU`/`.CRT$XIU` always land between the `.CRT$XCA`/`.CRT$XCZ`
 and `.CRT$XIA`/`.CRT$XIZ` pairs.  Akari ships those four NULL sentinels
 in `runtime.c` and walks the ranges first-to-last.  lld-link in `-wince`
 mode merges the family into one `.CRT` section sorted by subsection
-name — verified on linked armel images containing wince-crt objects and
-clang-cl objects: the layout is exactly `XCA(NULL) XCU(entry)
-XCZ(NULL) XIA(NULL) XIZ(NULL) [XTU...]` and no other data falls inside
-the walked ranges.  (The same ordering was verified for ld.lld on
-windows-gnu images.)  Mechanisms are no-ops when their tables are
-empty, so mixed-style links stay well-defined.
+name — verified on linked i386-pc-wince and arm-pc-wince images with
+`__declspec(allocate(".CRT$XCU"))`/`.CRT$XIU` user entries placed in
+both object orders: the layout is exactly `XCA(NULL) XCU(entry)
+XCZ(NULL) XIA(NULL) XIU(entry) XIZ(NULL)` with identical offsets in
+both orders, and no other data falls inside the walked ranges.  (The
+same ordering was verified for ld.lld on windows-gnu images.)
+Mechanisms are no-ops when their tables are empty, so mixed-style
+links stay well-defined.
+
+Note that the verified toolchain's own clang-cl (both `i386-pc-wince`
+and `arm-pc-wince`) does NOT emit `.CRT$XCU` for plain C++ static
+initializers: it emits GNU-style `.ctors` entries (`_GLOBAL__sub_I_*`,
+observed in the objects) and registers static destructors through
+`atexit` — those run through `__CTOR_LIST__`/`__DTOR_LIST__` and the
+C library's `atexit`, respectively.  `.CRT$X*` is therefore exercised
+only when a link contains explicitly allocated MS-style sections.
 
 ### Stack protection, builtins, C++
 
@@ -340,9 +352,22 @@ driver and COFF/CE lld support).
     the requested CE entry — `mainACRTStartup` (main app),
     `WinMainCRTStartup` (WinMain app), `mainWCRTStartup` (wmain app);
     `.ctors` = `[-1, entries..., 0]`, `.CRT` = the four NULL sentinels
-    (plus sorted user entries when a clang-cl object is present).
+    (plus sorted user entries when an MS-style `.CRT$XU`
+    object is present).
   * DLL (`akari_dllcrt.o + libakari.a + user DllMain`,
     `/dll /entry:DllMainCRTStartup`): links; subsystem 9.
+  * Entry resolution by `lld-link -wince` (verified): EXE links
+    require an explicit `/entry` — with none, lld's subsystem
+    default is the desktop `mainCRTStartup`, which CE images
+    deliberately do not define.  DLL links resolve without `/entry`
+    on ARM (the default search finds the `DllMainCRTStartup` alias);
+    on 32-bit x86 the default DLL-entry search uses the desktop
+    stdcall-decorated spelling (`__DllMainCRTStartup@12`), so x86 CE
+    DLL links must pass `/entry:DllMainCRTStartup`.  On x86, lld
+    decorates `/entry` names with a leading underscore — that is why
+    Akari provides the underscore aliases, and why `/entry` must be
+    spelled without one (`/entry:_DllMainCRTStartup` double-decorates
+    and fails).
   * The image imports only the coredll functions the CRT and the app
     actually use (`llvm-readobj --coff-imports`): the CRT's
     `TerminateProcess`, `GetModuleHandleW`, `GetCommandLineW`,
@@ -382,10 +407,13 @@ driver and COFF/CE lld support).
 * `___main`: i686 `windows-gnu` clang injects a call into `main()`
   (so Akari keeps its no-op `___main`); `i386-pc-wince` does not
   (verified on objects).
-* clang-cl objects for `arm-pc-wince` put initializer pointers in
-  `.CRT$XCU`/`.CRT$XTU` (use `/Zl` to drop the `.drectve` default-lib
-  lines); lld-link merges them into the sorted `.CRT` layout above
-  (verified).
+* clang-cl for `*-pc-wince` (both i386 and ARM) emits GNU-style
+  `.ctors` entries for C++ static initializers (`_GLOBAL__sub_I_*`)
+  and registers destructors via `atexit` — not `.CRT$XCU` (verified
+  on objects).  `.CRT$XCU`/`.CRT$XIU` appear only when user code
+  allocates them (`__declspec(allocate(...))`, MS-style objects); the
+  sentinel brackets around them were verified in both object orders
+  on both architectures (see "Constructor/destructor lists").
 * `.CRT$X*`/list layouts were verified in both object orders (user
   object before and after the CRT objects) with identical offsets.
 * Per-object `.ctors`/`.dtors` storage order differs between the two

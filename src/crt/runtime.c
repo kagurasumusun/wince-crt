@@ -144,12 +144,18 @@ WEAK void *__dso_handle = NULL;
 /* ------------------------------------------------------------------ */
 /* Section bookends for MSVC-style initializer tables.                */
 /*                                                                     */
-/* clang-cl / -fms-compatibility objects place C and C++ initializer
- * function pointers into COFF sections .CRT$XIU / .CRT$XCU and rely
- * on the linker to order the .CRT$X* family by section name; lld
- * merges and sorts that family (verified).  The NULL sentinels below
- * therefore bracket every user entry whose section name sorts between
- * the pairs:
+/* MS-style objects place C and C++ initializer function pointers
+ * into COFF sections .CRT$XIU / .CRT$XCU and rely on the linker to
+ * order the .CRT$X* family by section name; lld merges and sorts that
+ * family (verified on i386-pc-wince and arm-pc-wince images with
+ * __declspec(allocate(".CRT$XCU"))/.CRT$XIU user entries in both
+ * object orders: the merged .CRT is XCA(0), XCU, XCZ(0), XIA(0),
+ * XIU, XIZ(0)).  Note that the toolchain's own clang-cl does NOT use
+ * these sections for plain C++ static initializers: it emits GNU-style
+ * .ctors entries (__GLOBAL__sub_I_*) and registers destructors through
+ * atexit (observed on both architectures) -- those run through
+ * __CTOR_LIST__ below.  The NULL sentinels below bracket every user
+ * entry whose section name sorts between the pairs:
  *
  *     .CRT$XIA ..[user .CRT$XI* C inits].. .CRT$XIZ
  *     .CRT$XCA ..[user .CRT$XC* C++ inits].. .CRT$XCZ
@@ -215,7 +221,8 @@ static void put_wc(akari_wchar *out, size_t *n, akari_wchar c)
 /*                                                                     */
 /* One code path is used for both the counting pass and the
  * materialising pass (vec == NULL => count only), so the two can
- * never disagree.  Rules implemented, from Microsoft documentation:
+ * never disagree.  Rules implemented, from Microsoft documentation
+ * (CommandLineToArgvW, "Parsing C command-line arguments"):
  *  - arguments are delimited by space/tab outside quotes;
  *  - inside quotes whitespace is ordinary text;
  *  - 2n backslashes before a quote  -> n backslashes, quote toggles
@@ -226,7 +233,18 @@ static void put_wc(akari_wchar *out, size_t *n, akari_wchar c)
  *  - "" inside a quoted region      -> one literal quote;
  *  - an unterminated quoted region runs to the end of the string;
  *  - a command line that starts with whitespace yields an empty first
- *    argument.
+ *    argument (CommandLineToArgvW "Important" note).
+ *
+ * The same rules apply to argv[0] as to every other token -- Akari
+ * follows CommandLineToArgvW, whose algorithm covers the program-name
+ * token uniformly.  (Microsoft's separate desktop-CRT note that
+ * argv[0] is a pathname exempt from the later parsing rules is a
+ * property of the desktop startup code, not of CommandLineToArgvW;
+ * Windows CE's Unicode command-line model is the CommandLineToArgvW
+ * one.)  When the whole command line is an empty string,
+ * CommandLineToArgvW's documented behavior -- argv[0] is the full
+ * path of the current executable (GetModuleFileNameW) -- is
+ * implemented in akari_init_args().
  *
  * Every token is NUL-terminated in the pool.  Returns argc.          */
 /* ------------------------------------------------------------------ */
