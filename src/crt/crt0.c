@@ -64,12 +64,19 @@ typedef akari_dword  DWORD_T;
 
 /* Process termination on Windows CE.
  *
- * coredll does NOT export ExitProcess (it is absent from every CE
- * coredll export set -- verified against the CE 4/5/6 coredll import
- * libraries of the toolchain sysroot; Microsoft's ExitProcess
- * documentation covers desktop Windows only).  The CE termination
- * call is TerminateProcess, which coredll does export on every CE
- * generation.  Its first argument is the handle of the process to
+ * coredll does NOT export ExitProcess on any CE generation (absent
+ * from every CE 4/5/6 coredll import library of the toolchain
+ * sysroot).  Microsoft's CE documentation does include an
+ * "ExitProcess (Windows CE 5.0)" page (MSDN archive ms885217) that
+ * lists "OS Versions: Windows CE 2.0 and later" and "Link Library:
+ * Coredll.lib", but no CE 4/5/6 import library exports it and the CE
+ * toolchain headers of the sysroot declare ExitProcess as an inline
+ * TerminateProcess(GetCurrentProcess(), code) wrapper instead; the
+ * doc page is treated as inaccurate on that export point.  The CE
+ * termination call is TerminateProcess, which the CE documentation
+ * (MSDN archive aa450927: "OS Versions: Windows CE 1.0 and later",
+ * Link Library: Coredll.lib) and every CE coredll import library
+ * agree on.  Its first argument is the handle of the process to
  * end; for the calling process the CE system-handle space defines a
  * fixed pseudo-handle for "the current process" (SDK kfuncs.h:
  * GetCurrentProcess() = SH_CURPROC(2) + SYS_HANDLE_BASE(64) = 66;

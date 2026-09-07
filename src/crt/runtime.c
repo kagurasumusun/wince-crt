@@ -113,10 +113,16 @@ AKARI_DLLIMPORT akari_dword GetModuleFileNameW(akari_handle,
 AKARI_DLLIMPORT void *LocalAlloc(akari_dword, size_t)
     __asm__("LocalAlloc");
 AKARI_DLLIMPORT void LocalFree(void *) __asm__("LocalFree");
-/* coredll exports GetProcAddress only in its W spelling on every CE
- * generation (verified against the CE 4/5/6 import libraries of the
- * toolchain sysroot); SDK headers map GetProcAddress ->
- * GetProcAddressW the same way. */
+/* coredll exports GetProcAddressW and GetProcAddressA: the CE
+ * documentation ("GetProcAddress (Windows CE 5.0)", MSDN archive
+ * ms885634) documents the function as Unicode-only (lpProcName is
+ * LPCWSTR, "Windows CE 1.0 and later") and states in its remarks
+ * that the ASCII version GetProcAddressA is supported for Windows CE
+ * 3.0 and later; both exports are present in the CE 4/5/6 import
+ * libraries of the toolchain sysroot.  There is no undecorated
+ * GetProcAddress export; SDK headers map GetProcAddress ->
+ * GetProcAddressW.  This code pins the W spelling, available on
+ * every CE generation. */
 AKARI_DLLIMPORT void *GetProcAddressW(akari_handle, const akari_wchar *)
     __asm__("GetProcAddressW");
 

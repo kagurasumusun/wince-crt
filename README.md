@@ -329,8 +329,12 @@ Every CRT/startup/link record in this repository was re-checked against
 the official Windows CE documentation as published by Microsoft (the
 CE-era MSDN pages, now served as *Windows Embedded / MSDN archive*
 under learn.microsoft.com; URLs below are the canonical archive IDs).
-Result: **zero contradictions** — every fetched page agrees with the
-records stated above.  Claim → source correspondence:
+Result: every fetched page agrees with the records stated above, with
+**one documented conflict** — the official *ExitProcess* page
+(`ms885217`) claims a Coredll.lib export that no CE 4/5/6 import
+library provides (see the last table row and the notes below).  The
+conflict changes no code: Akari never references `ExitProcess`.  Claim
+→ source correspondence:
 
 | Record in this repository | Official source (all fetched in full) |
 |---|---|
@@ -341,12 +345,18 @@ records stated above.  Claim → source correspondence:
 | CE `DllMain` prototype `BOOL WINAPI DllMain(HANDLE hinstDLL, DWORD dwReason, LPVOID lpvReserved)` (handle, not instance); hinstDLL = module base address = HMODULE; initial thread receives only PROCESS_ATTACH; `LoadLibrary` does not notify already-running threads; unload delivers no per-thread DETACH; FALSE on PROCESS_ATTACH ⇒ `LoadLibrary` returns NULL / process-init failure terminates the process; return value ignored for other reasons; no LoadLibrary/FreeLibrary from the entry | *DllMain (Windows CE 5.0)*, `ms885202` |
 | `/ENTRY` table: `WinMainCRTStartup` → app calling `__cdecl WinMain`; `wWinMainCRTStartup` → app calling `__cdecl wWinMain`; `_DllMainCRTStartup` → DLL calling `__cdecl DllMain`; with neither `/DLL` nor `/SUBSYSTEM`, the linker picks subsystem and entry from whether main or WinMain is defined; parameters/return must match the documented signatures | */ENTRY (Windows CE 5.0)*, `aa449732` |
 | Undecorated, Unicode import model (`coredll.dll` API surface): CE function pages uniformly state “OS Versions: Windows CE 2.0 and later … Link Library: coredll.dll” and that Windows CE supports only the Unicode version of wide APIs | CE run-time function pages (`ms860473` towlower, `ms860377` srand, `ms860374` sprintf, `ms861145` _snprintf, `ms860368` setvbuf, `ms859665` malloc, `ms860384` strcat); *GetCommandLine (Windows CE 3.0)* `ms928607` |
+| The CRT's hard coredll imports are available on every target generation (CE 4.x/5.x/6.x): `TerminateProcess`; `GetModuleHandleW` (NULL ⇒ pseudo-handle of the current process); `GetCommandLineW` (the only version Windows CE supports); `GetModuleFileNameW`; `GetProcAddressW`; `LocalAlloc` (CE heap model: local and global heaps are the same); `LocalFree` | Official per-function pages (CE 5.0 archive, all “Link Library: Coredll.lib”): `TerminateProcess` `aa450927` (CE 1.0+); `GetModuleHandle` `ms885630` (CE 2.10+; “Coredll.lib, Nk.lib”); `GetCommandLine` `ms885605` (CE 3.0+; Remarks: “Windows CE supports only the Unicode version of this function”); `GetModuleFileName` `ms885629` (CE 2.0+); `GetProcAddress` `ms885634` (CE 1.0+; Remarks: the ASCII version `GetProcAddressA` is supported for CE 3.0+); `LocalAlloc` `ms886739` (CE 1.0+; documents `LPTR` = `LMEM_FIXED`+`LMEM_ZEROINIT`); `LocalFree` `ms886741` (CE 1.0+) |
+| coredll exports `GetProcAddressW` **and** `GetProcAddressA` (no undecorated `GetProcAddress`), so the runtime pins the W spelling which exists on every generation | `ms885634` (above) agrees; the CE 4/5/6 import libraries of the toolchain sysroot define both exports (verified; this corrected a stale source comment that claimed a W-only export) |
+| The narrow-argv converter `WideCharToMultiByte(CP_ACP)` is resolved at runtime and degrades (lossy 7-bit) when the OS image lacks it, because optional modules may be cut from an OEM image | *WideCharToMultiByte (Windows CE 3.0)* `ms915519` and *MultiByteToWideChar* `ms961248` carry the official note: “This API is part of the complete Windows CE OS package as provided by Microsoft. … some devices may not support this API” (same note on the CE 3.0-era *TerminateProcess* `ms913239`) |
+| Process-exit fallback uses only `TerminateProcess` on the current process (coredll exports no `ExitProcess` on any CE generation — **documented conflict**, see Notes) | `TerminateProcess` `aa450927` (CE 1.0+, Coredll.lib) matches the record; the conflicting page is *ExitProcess (Windows CE 5.0)* `ms885217` (“OS Versions: Windows CE 2.0 and later”, “Link Library: Coredll.lib”), which no CE 4/5/6 import library of the sysroot satisfies, whose role the sysroot's CE headers fill with an inline `TerminateProcess(GetCurrentProcess(), code)` wrapper, and for which no CE 3.0-era page exists in the archive — treated as a documentation error on the export point |
 
 Notes: the CE 5.0 pages above are part of the *Windows CE 5.0
 documentation* (MSDN), served as `(v=msdn.10)` archive pages; the
-per-function “Requirements” blocks are version-uniform (CE 2.0 and
-later, header + `coredll.dll`), which is why one record set covers the
-CE 4.x/5.x/6.0 targets.  Two corroborations from the same archive:
+per-function “Requirements” blocks state a minimum CE version (1.0,
+2.0, 2.10 or 3.0 depending on the function) plus header and
+`coredll.dll` — all minimums lie below the CE 4.x/5.x/6.0 targets,
+which is why one record set covers the three generations.  Two
+corroborations from the same archive:
 `ms859579` states that the CE run-time library supports neither ANSI C
 nor POSIX and provides only a Win32-API-compatible subset (no console,
 path/filename file handling, locale, time-setting, or process-spawn
@@ -356,9 +366,29 @@ from the entry, no synchronization inside `DllMain`, serialized entry
 calls, and safe Win32 calls during detach limited to TLS, object
 creation, and file functions) is guidance to user `DllMain` code that
 the implemented `_DllMainCRTStartup` sequence does not conflict with.
-All claims above were checked in full; no contradiction was found with
-the platform documentation, and no code change resulted from the
-re-check.
+
+The one conflict found: `ms885217` documents `ExitProcess` with
+“OS Versions: Windows CE 2.0 and later … Link Library: Coredll.lib”,
+but `ExitProcess` is absent from every CE 4/5/6 coredll import
+library of the toolchain sysroot (whose defs are cross-checked against
+device dumps by the toolchain's `audit-coredll.py`), the sysroot's CE
+headers declare `ExitProcess` as an inline wrapper that calls
+`TerminateProcess(GetCurrentProcess(), code)` (visible in the compiled
+sysroot CRT objects as a `TerminateProcess` call with the
+current-process pseudo-handle 66), and no CE 3.0-era `ExitProcess`
+page exists in the archive.  The doc page is therefore treated as
+inaccurate on that export point, and the verified import surface
+governs (an app that referenced `ExitProcess` would not link against
+the sysroot `coredll.lib`).  Akari never references `ExitProcess`, so
+this conflict changes no code; the stale in-tree claims it exposed —
+crt0.c's “ExitProcess documentation covers desktop Windows only” and
+runtime.c's “GetProcAddress only in its W spelling” — were corrected
+to the statements above.  The CE 6.0-era documentation set
+(`(v=winembedded.60)`) that survives on Microsoft Learn holds
+Platform Builder and run-time overview material; the per-function API
+reference pages for these functions live in the `(v=msdn.10)` archive.
+No other contradiction was found with the platform documentation, and
+no code change resulted from the re-check.
 
 ### Verified toolchain behavior (kagurasumusun/llvm-project, branch LLVM-WinCE)
 
@@ -476,10 +506,14 @@ driver and COFF/CE lld support).
   CE 4/5 loaders accept a 6.0 stamp is not verified on hardware — if a
   CE 4/5 device rejects it, the fix belongs in the linker's CE support
   (a header patch is outside Akari's scope).
-* Per-CE-version (4.x/5.x/6.x) export coverage of the imported APIs
-  against official SDK documentation is a pending audit; images that
-  cut optional modules are handled defensively at runtime (see the
-  `WideCharToMultiByte` fallback above).
+* Per-CE-version export coverage of the imported APIs against the
+  official per-function documentation was audited (see the
+  “Official-source cross-check” section): each import is documented
+  for CE 4.x–6.x with “Link Library: Coredll.lib” and matches the
+  sysroot import surface, with the single documented `ExitProcess`
+  conflict described there.  Images that cut optional modules are
+  handled defensively at runtime (see the `WideCharToMultiByte`
+  fallback above).
 
 ## License
 
