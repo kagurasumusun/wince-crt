@@ -3,146 +3,109 @@
  * Copyright (c) 2026 Akari CRT contributors
  * SPDX-License-Identifier: MIT
  *
- * dllcrt.c -- _DllMainCRTStartup for Windows CE 4/5/6 DLLs.
+ * dllcrt.c -- Windows CE DLL entry point for Clang/lld-built DLLs.
  *
- * Official entry-point name per Microsoft docs: _DllMainCRTStartup
- * (leading underscore, no trailing @N on ARM/MIPS/SH; on x86
- * emulator the linker looks for _DllMainCRTStartup@12 because the
- * x86 emulator toolchain uses stdcall for DLL entry points).  We
- * export the plain _DllMainCRTStartup name on all architectures and
- * additionally alias the @12 stdcall-decorated form on 32-bit x86
- * Windows targets; this matches what MSVC's corelibc exports.
+ * Official name, per Microsoft's "Linking to the CRT (Windows CE
+ * 5.0)": _DllMainCRTStartup (with the leading underscore, on every CE
+ * architecture).  Windows CE uses the plain C calling convention --
+ * __cdecl semantics -- for DLL entry functions on x86 as well (per
+ * the "/ENTRY (Windows CE 5.0)" documentation), so there is no
+ * @12-decorated x86 variant to provide.
+ *
+ * The linker's default DLL-entry search (lld, windows-gnu flavour)
+ * first looks for the unadorned "DllMainCRTStartup"; a one-line
+ * wrapper provides that spelling and forwards to the canonical
+ * function, so linking a DLL without an explicit /entry works on all
+ * CE architectures.
+ *
+ * Runtime behavior follows Microsoft's "Run-time Library Behavior
+ * (Windows CE 5.0)" documentation:
+ *   - DLL_PROCESS_ATTACH:  constructors for global objects run first,
+ *     then the user DllMain is called; __dso_handle is set to the
+ *     module handle so destructor registration can be scoped to this
+ *     DLL image;
+ *   - DLL_PROCESS_DETACH:  the user DllMain runs first, then the
+ *     termination functions (global/static destructors) -- the
+ *     reverse of attach, as documented;
+ *   - DLL_THREAD_ATTACH / DLL_THREAD_DETACH (and unknown future
+ *     reason codes): forwarded to DllMain; the CRT performs no
+ *     per-thread initialization or termination of its own.
+ *
+ * Scope: startup glue only (see README for the responsibility
+ * table).  atexit()/__cxa_finalize processing belongs to the C
+ * library / libc++abi; Akari provides __dso_handle and runs the
+ * destructor list that Clang emits for windows-gnu objects
+ * (__DTOR_LIST__).
  */
 #include <stddef.h>
 #include <stdint.h>
 #include <akari/compiler.h>
+#include <akari/internal.h>
 
-/* ---------- Win32 primitive types ---------- */
-typedef int            BOOL;
-typedef unsigned int   UINT;
-typedef unsigned long  DWORD;
-typedef size_t         SIZE_T;
-typedef void *HMODULE, *HINSTANCE, *LPVOID;
-typedef void (*init_fn)(void);
-typedef void (*fini_fn)(void);
-typedef BOOL (WINAPI *dllmain_t)(HINSTANCE, DWORD, LPVOID);
+/* ------------------------------------------------------------------ */
+/* Types / constants (BOOL is int in the Win32 data model)            */
+/* ------------------------------------------------------------------ */
 
-#ifndef TRUE
-#  define TRUE  1
-#  define FALSE 0
-#endif
+typedef int         BOOL_T;
+typedef akari_handle HINSTANCE_T;
+typedef akari_dword  DWORD_T;
+typedef void        *LPVOID_T;
 
-AKARI_DLLIMPORT void DisableThreadLibraryCalls(HMODULE);
+#define DLL_PROCESS_ATTACH 1u
+#define DLL_THREAD_ATTACH  2u
+#define DLL_THREAD_DETACH  3u
+#define DLL_PROCESS_DETACH 0u
 
-#define DLL_PROCESS_ATTACH 1
-#define DLL_THREAD_ATTACH  2
-#define DLL_THREAD_DETACH  3
-#define DLL_PROCESS_DETACH 0
+/* ------------------------------------------------------------------ */
+/* User DllMain.  A consumer-defined DllMain overrides this weak
+ * default (which just reports success) at link time.                 */
+/* ------------------------------------------------------------------ */
 
-/* ---------- __dso_handle (shared with crt0.c; DLL has its own) ----------
- * For a DLL, __dso_handle identifies the DLL image so __cxa_atexit
- * can run the correct destructors on FreeLibrary.  Setting it to
- * the HMODULE of the DLL is the conventional Itanium ABI approach;
- * libc++abi uses this to match destructors against the unloaded
- * image.  We store it here and update it on PROCESS_ATTACH. */
-void *__dso_handle = NULL;
+BOOL_T DllMain(HINSTANCE_T, DWORD_T, LPVOID_T) WEAK;
 
-/* ---------- Bookend sentinels for MSVC .CRT$X* sections ---------- */
-#define DEFINE_CRT_TERM(x)                                              \
-    __attribute__((section(".CRT$" #x), used)) static init_fn _crt_##x = (init_fn)0;
-DEFINE_CRT_TERM(XIA)
-DEFINE_CRT_TERM(XCA)
-DEFINE_CRT_TERM(XCZ)
-#undef DEFINE_CRT_TERM
-
-static init_fn *const _xi_start = &_crt_XIA + 1;
-static init_fn *const _xi_end   = &_crt_XCA;
-static init_fn *const _xc_start = &_crt_XCA + 1;
-static init_fn *const _xc_end   = &_crt_XCZ;
-
-extern init_fn __init_array_start[]  __attribute__((weak));
-extern init_fn __init_array_end[]    __attribute__((weak));
-extern fini_fn __fini_array_start[]  __attribute__((weak));
-extern fini_fn __fini_array_end[]    __attribute__((weak));
-extern init_fn __CTOR_LIST__[]       __attribute__((weak));
-extern init_fn __CTOR_END__[]        __attribute__((weak));
-
-static void _run_table(init_fn *s, init_fn *e) {
-    if (!s || !e) return;
-    for (init_fn *p = s; p < e; p++) if (*p) (*p)();
-}
-static void _run_ctors(void)
+BOOL_T DllMain(HINSTANCE_T hDll, DWORD_T reason, LPVOID_T reserved)
 {
-    if (__init_array_start && __init_array_end)
-        _run_table(__init_array_start, __init_array_end);
-    _run_table(_xi_start, _xi_end);
-    _run_table(_xc_start, _xc_end);
-    if (__CTOR_LIST__ && __CTOR_END__) {
-        init_fn *list = __CTOR_LIST__;
-        size_t n = 0;
-        if ((intptr_t)list[0] == (intptr_t)-1) { list++; while (list[n]) n++; }
-        else { while ((intptr_t)list[n] != 0) n++; }
-        for (size_t i = n; i > 0; i--) if (list[i-1]) list[i-1]();
-    }
-}
-static void _run_dtors(void)
-{
-    if (__fini_array_start && __fini_array_end) {
-        size_t n = (size_t)(__fini_array_end - __fini_array_start);
-        for (size_t i = n; i > 0; i--)
-            if (__fini_array_start[i-1]) __fini_array_start[i-1]();
-    }
+    (void) hDll;
+    (void) reason;
+    (void) reserved;
+    return 1; /* TRUE */
 }
 
-/* ---------- Weak user DllMain ---------- */
-BOOL WINAPI DllMain(HINSTANCE, DWORD, LPVOID) __attribute__((weak));
-BOOL WINAPI DllMain(HINSTANCE hDll, DWORD reason, LPVOID reserved)
-{
-    (void)hDll; (void)reason; (void)reserved;
-    return TRUE;
-}
+/* ------------------------------------------------------------------ */
+/* DLL entry point.  The canonical CE spelling is _DllMainCRTStartup;
+ * "DllMainCRTStartup" is the alias lld's default DLL-entry search
+ * tries first.                                                       */
+/* ------------------------------------------------------------------ */
 
-/* ---------- DLL entry prototype & definition ---------- */
-BOOL USED WINAPI AKARI_ENTRY("_DllMainCRTStartup")
-     _DllMainCRTStartup(HINSTANCE hDll, DWORD reason, LPVOID lpvReserved);
+BOOL_T DllMainCRTStartup(HINSTANCE_T, DWORD_T, LPVOID_T)
+    AKARI_ENTRY("_DllMainCRTStartup");
+BOOL_T DllMainCRTStartupAlias(HINSTANCE_T, DWORD_T, LPVOID_T)
+    AKARI_ENTRY("DllMainCRTStartup");
 
-BOOL USED WINAPI AKARI_ENTRY("_DllMainCRTStartup")
-     _DllMainCRTStartup(HINSTANCE hDll, DWORD reason, LPVOID lpvReserved)
+BOOL_T DllMainCRTStartup(HINSTANCE_T hDll, DWORD_T reason,
+                         LPVOID_T reserved)
 {
-    BOOL r;
+    BOOL_T r;
+
     switch (reason) {
     case DLL_PROCESS_ATTACH:
         __dso_handle = hDll;
-        DisableThreadLibraryCalls(hDll);
-        _run_ctors();
-        r = DllMain(hDll, reason, lpvReserved);
+        akari_run_ctors();
+        r = DllMain(hDll, reason, reserved);
         break;
     case DLL_PROCESS_DETACH:
-        r = DllMain(hDll, reason, lpvReserved);
-        _run_dtors();
-        break;
-    case DLL_THREAD_ATTACH:
-    case DLL_THREAD_DETACH:
-        /* Normally suppressed by DisableThreadLibraryCalls, but
-         * forwarded if they do arrive. */
-        r = DllMain(hDll, reason, lpvReserved);
+        r = DllMain(hDll, reason, reserved);
+        akari_run_dtors();
         break;
     default:
-        r = DllMain(hDll, reason, lpvReserved);
+        r = DllMain(hDll, reason, reserved);
         break;
     }
     return r;
 }
 
-/* On the x86 emulator (Windows CE emulation) the linker asks for
- * the stdcall-decorated name _DllMainCRTStartup@12.  We cannot use
- * a normal function definition because the caller will expect a
- * ret 12 epilogue on x86 (stdcall), but ARM/MIPS/SH do not have
- * stdcall at all.  The cleanest portable approach is to NOT
- * provide a second definition here -- the _DllMainCRTStartup name
- * already satisfies non-x86 linkers, and on x86 we rely on clang's
- * ability to alias symbols.  In practice the emulator uses the
- * MSVC-mangled @12 name only when built with /GD; Akari builds
- * use the cdecl-compatible _DllMainCRTStartup because WINAPI
- * expands to empty on _WIN32_WCE.  If a consumer needs @12 they
- * can pass -Wl,--defsym=_DllMainCRTStartup@12=_DllMainCRTStartup. */
+BOOL_T DllMainCRTStartupAlias(HINSTANCE_T hDll, DWORD_T reason,
+                              LPVOID_T reserved)
+{
+    return DllMainCRTStartup(hDll, reason, reserved);
+}

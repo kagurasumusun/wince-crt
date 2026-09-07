@@ -3,18 +3,25 @@
  * Copyright (c) 2026 Akari CRT contributors
  * SPDX-License-Identifier: MIT
  *
- * crt.h -- Declarations of the MSVCRT-ABI global symbols that Akari
- * defines.
+ * crt.h -- public data-global declarations provided by the CRT.
  *
- * Akari does NOT provide the C library.  exit(), malloc(), printf(),
- * errno, atexit(), stdio FILE objects, string/math/stdlib/ctype,
- * setjmp/longjmp, __stack_chk_guard/__stack_chk_fail all come from
- * whichever C library the consumer links against (coredll.dll,
- * newlib, llvm-libc).
+ * Scope: Akari is the PE/COFF startup and process-glue layer for
+ * programs built with Clang/lld for Windows CE.  It is NOT a C
+ * library: malloc/printf/exit/atexit/errno/stdio/string/setjmp all
+ * come from whichever C library the consumer links (e.g. the
+ * platform's corelibc equivalent built from newlib-style sources, an
+ * llvm-libc port, or a C library linked from coredll imports).
  *
- * What Akari DOES define, and what this header exposes, are the
- * per-process MSVCRT data globals that no DLL exports (every Win32
- * CRT defines its own copies).
+ * The symbols declared here are per-process data objects of the
+ * MSVCRT data model (__argc/__argv/...) that no OS DLL exports; each
+ * EXE and each DLL module that uses them links its own copy from
+ * Akari.  The wide forms are the native ones on Windows CE (only the
+ * Unicode forms of the command-line APIs exist on CE); the narrow
+ * forms are synthesized with WideCharToMultiByte(CP_ACP) when the
+ * converter is present in the OS image and lossily otherwise.
+ *
+ * Windows CE has no POSIX environment block: envp is NULL for
+ * main()/wmain() and there is no environ.
  */
 #ifndef _AKARI_CRT_H_
 #define _AKARI_CRT_H_
@@ -24,15 +31,16 @@
 
 AKARI_BEGIN_EXTERN_C
 
-extern int              __argc;       /* number of parsed arguments */
-extern char           **__argv;       /* narrow argument vector (CP_ACP or lossy ASCII) */
-extern wchar_t        **__wargv;      /* wide (native UTF-16) argument vector */
-extern char            *_acmdln;      /* narrow command tail (== __argv[0] when set) */
-extern wchar_t         *_wcmdln;      /* full wide command line (GetCommandLineW() result) */
-extern wchar_t         *_wcmdtail;    /* tail pointer handed to WinMain lpCmdLine */
-extern int              _fmode;       /* default file translation mode (0 = _O_BINARY) */
-extern int              _doserrno;    /* errno <-> GetLastError mapping (maintained by libc) */
-extern int              _commode;     /* default commit-on-write flag */
+extern int              __argc;    /* argument count (>= 1; argv[0] set) */
+extern char           **__argv;    /* narrow argv (CP_ACP conversion) */
+extern wchar_t        **__wargv;   /* native wide argv */
+extern char            *_acmdln;   /* narrow copy of the raw command line */
+extern wchar_t         *_wcmdln;   /* raw command line (GetCommandLineW) */
+extern wchar_t         *_wcmdtail; /* WinMain lpCmdLine: raw tail after argv[0] */
+extern int              _fmode;    /* default file translation mode (0) */
+extern int              _doserrno; /* errno mapping slot (libc-maintained) */
+extern int              _commode;  /* commit mode flag (0) */
+extern void            *__dso_handle; /* NULL in EXE; DLL HMODULE in DLLs */
 
 AKARI_END_EXTERN_C
 #endif /* _AKARI_CRT_H_ */

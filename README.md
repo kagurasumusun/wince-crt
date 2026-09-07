@@ -1,281 +1,282 @@
 # Akari CRT (明かり) — Windows CE startup glue for Clang/LLVM
 
-Akari (明かり — "light" in Japanese) is the tiny, architecture-neutral PE
-startup glue that gets a program compiled with Clang/lld for **Windows CE 4
-through 6** from the PE entry point to the user's `main` / `WinMain` /
-`wWinMain`, with command-line arguments parsed, C++ constructors executed,
-and shutdown properly delegated to the C library.
+Akari is a small, architecture-neutral PE/COFF **startup layer** for
+programs built with **Clang/lld** targeting **Windows CE 4.x, 5.x and 6.x**
+(ARM, x86, MIPS, SuperH).  It gets an image from the PE entry point to the
+user's `main` / `wmain` / `WinMain` / `wWinMain` / `DllMain`: it parses the
+command line, runs global constructors, and hands shutdown to the C
+library.
 
-Akari is **NOT a C library, NOT a C++ runtime, NOT compiler-rt, NOT a
-WinCE SDK, and NOT a linker script**. All of those come from other parts
-of the LLVM/Clang/coredll ecosystem (see the responsibility table below).
-
----
+Akari is **not** a C library, **not** a C++ runtime, **not**
+compiler-rt, and **not** an SDK or linker script.  No libc, libstdc++,
+libc++ or STL code lives here; those responsibilities stay with the
+components the consumer links (see the table below).  Akari deliberately
+replaces only the role a MinGW-style runtime played for the
+`*-windows-gnu` Clang toolchain.
 
 ## Responsibility table
 
 | Concern | Provider | Akari ships it? |
 |---|---|---|
-| PE/COFF EXE entry points (`WinMainCRTStartup`, `wWinMainCRTStartup`, `mainCRTStartup`, `mainWCRTStartup`, `mainACRTStartup`) | **Akari** (`akari_crt0.o`) | ✅ |
-| PE/COFF DLL entry point (`_DllMainCRTStartup`) | **Akari** (`akari_dllcrt.o`) | ✅ |
-| `GetCommandLineW()` parse into `__argc`/`__wargv` (CommandLineToArgvW rules: quotes, backslash 2N/2N+1, `""`-in-quotes → literal `"`) | **Akari** (clean-room parser, only depends on coredll `LocalAlloc/LocalFree`) | ✅ |
-| `WinMain`/`wWinMain` `lpCmdLine` pointer into raw command-line tail (after argv[0], preserving leading whitespace — the Win32 convention, NOT a copy of argv[1]) | **Akari** (`_wcmdtail`) | ✅ |
-| Narrow `__argv`/`_acmdln` synthesis: `WideCharToMultiByte(CP_ACP)` when available, lossy ASCII fallback otherwise | **Akari** | ✅ |
-| `.init_array` constructors (forward order), `.fini_array` destructors (reverse order), legacy `.ctors` (reverse-order fallback) | **Akari** | ✅ |
-| MSVCRT data globals: `__argc`, `__argv`, `__wargv`, `_acmdln`, `_wcmdln`, `_wcmdtail`, `_fmode`, `_doserrno`, `_commode` | **Akari** (coredll does NOT export these data objects) | ✅ |
-| Weak default `WinMain` → `main`, weak default `DllMain` → TRUE | **Akari** | ✅ |
-| Shutdown handoff: call libc `exit(rc)` so that `atexit` handlers, `__cxa_atexit`-registered C++ destructors (via libc calling `__cxa_finalize`), stdio flushes, and the final `ExitProcess` all run in the right order | **Akari** (just the call; the sequencing is libc's responsibility) | ✅ stub |
-| C library: `malloc`/`free`/`printf`/`exit`/`atexit`/`abort`/`strlen`/`memcpy`/`setjmp`/`longjmp`/errno accessors | **libc** (coredll msvcrt, newlib, llvm-libc) | ❌ |
-| `__stack_chk_guard` / `__stack_chk_fail` (stack protector) | **libc** (or compiler-rt) — Akari compiles its own startup files with `-fno-stack-protector` because the guard is not yet valid when the entry point runs | ❌ |
-| `__cxa_atexit`, `__cxa_finalize`, `__cxa_pure_virtual`, operator `new`/`delete`, EH personality (`__gxx_personality_v0`), RTTI | **libc++ / libc++abi** (coredll also exports MS-C++ new/delete @1094/1095/1456/1457) | ❌ |
-| Exception unwinding (ARM EHABI `.pdata`/`.xdata` walking, Itanium LSDA) | **llvm-libunwind** / libc++abi's built-in unwinder | ❌ |
-| Compiler builtins: `__chkstk`, `__aeabi_*` division/memory helpers, `__udivmodsi3`, `__floatdidf`, ... | **compiler-rt** (auto-linked by clang) | ❌ |
-| TLS callbacks (`__tls_used` / `.tls` directory), `__declspec(thread)` initialisation | **lld + OS loader** — the linker emits the TLS directory; the OS calls callbacks before `DllMain`/`_DllMainCRTStartup`.  Not a CRT concern. | ❌ |
-| Per-thread DLL notifications (`DLL_THREAD_ATTACH`/`DETACH`): explicitly *disabled* at PROCESS_ATTACH via `DisableThreadLibraryCalls`; if a consumer needs them they must handle TLS callbacks instead | **OS**, but suppressed by Akari | ❌ (suppressed) |
-| PE/COFF layout, subsystem selection, `/ENTRY` resolution, `.pdata`/`.xdata` EH tables | **lld** — pass `-Wl,-subsystem:windowsce:<ver>` and `-Wl,-entry:<name>` | ❌ |
-| Win32 SDK headers (`windows.h`, `windef.h`, `winnt.h`), `coredll.lib` import library | Consumer's WinCE SDK / Platform Builder output | ❌ |
-
----
+| EXE entry points `WinMainCRTStartup`, `wWinMainCRTStartup`, `mainACRTStartup`, `mainWCRTStartup` (the four names Windows CE documents; there is **no** `mainCRTStartup` on CE — see below) | **Akari** (`akari_crt0.o`) | ✅ |
+| x86-only legacy aliases `_WinMainCRTStartup`, `_wWinMainCRTStartup`, `_mainACRTStartup`, `_mainWCRTStartup` (leading-underscore spellings of the older CE x86 tools) | **Akari** | ✅ |
+| DLL entry points `_DllMainCRTStartup` (canonical CE spelling) and `DllMainCRTStartup` (lld's default DLL-entry search name) | **Akari** (`akari_dllcrt.o`) | ✅ |
+| Command-line parse into `__argc`/`__argv`/`__wargv`, `_wcmdtail` for `WinMain`'s `lpCmdLine`, per the documented MS parsing rules | **Akari** (clean-room parser; imports `GetCommandLineW`) | ✅ |
+| Narrow `__argv`/`_acmdln`: `WideCharToMultiByte(CP_ACP)` resolved at runtime, lossy 7-bit fallback when the converter is absent from the OS image | **Akari** | ✅ |
+| MSVCRT-model data globals `__argc __argv __wargv _acmdln _wcmdln _wcmdtail _fmode _doserrno _commode __dso_handle` (coredll exports no data objects) | **Akari** (`libakari.a`) | ✅ |
+| C constructors: `.CRT$XI*` / `.CRT$XC*` (MS-style objects) first-to-last, then the lld GNU `.ctors` list; C destructors from the lld `.dtors` list | **Akari** | ✅ |
+| Weak user-entry fallbacks (`DllMain` default in the DLL object; missing `main`/`WinMain` detected at runtime) | **Akari** | ✅ |
+| x86 `___main` hook (i686 Clang makes `main()` call it; here it is a no-op because entry points already ran constructors) | **Akari** | ✅ |
+| Process exit: call the C library's `exit()` when one is linked (atexit/`__cxa_finalize`/stdio flush happen there); direct `ExitProcess` only as a no-libc fallback | **Akari** (just the call) | ✅ |
+| C library (`malloc`/`printf`/`exit`/`atexit`/`abort`/`memcpy`/`setjmp`/errno/...) | **libc** (coredll msvcrt exports, newlib, llvm-libc...) | ❌ |
+| `__stack_chk_guard`/`__stack_chk_fail`, `__chkstk`, `__aeabi_*` builtins | **libc / compiler-rt** (clang links compiler-rt automatically) | ❌ |
+| `__cxa_atexit`/`__cxa_finalize`, `__cxa_pure_virtual`, `new`/`delete`, EH personality, RTTI | **libc++ / libc++abi** | ❌ |
+| `.pdata`/`.xdata` EH tables and unwinding | **lld / llvm-libunwind** | ❌ |
+| TLS directory, TLS callbacks | **lld + OS loader** | ❌ |
+| PE layout, subsystem header, `/ENTRY` resolution | **lld** | ❌ |
+| SDK headers, `coredll.lib` | consumer's Windows CE SDK / Platform Builder | ❌ |
 
 ## Supported architectures and CE versions
 
-Akari is written to be **architecture-neutral**.  All sources are C99 with a
-small set of compiler attributes; there is no inline assembly, no endianness
-assumption, no pointer-width assumption, and no calling-convention decorator
-that hard-codes one ISA.
+All sources are C99, use no inline assembly, no endianness or pointer-width
+assumptions, and no ISA-specific calling-convention decorations; clang does
+the lowering.  `WINAPI` (in `include/akari/compiler.h`) is empty on
+Windows CE (Microsoft documents CE entry functions as `__cdecl`; on ARM
+`__cdecl`/`__stdcall` coincide, and on x86 CE the CRT entry names carry
+no `@n` decoration), and expands to `__stdcall` only for desktop 32-bit
+x86 builds of the same headers.
 
-| Architecture | CE versions | coredll calling convention |
+| Architecture | CE versions | status |
 |---|---|---|
-| ARM (v4, v4i, v5, v6, v7 Thumb/Thumb2, IWMMXT) | 4.0–6.0 (+7) | Platform default (APCS/AAPCS); no `__stdcall` |
-| x86 (i486+, CEPC / DeviceEmulator) | 4.0–6.0 | **`__cdecl`** — *not* `__stdcall` like desktop Win32.  coredll symbols are undecorated; decorating them `__stdcall` produces `_Foo@4` lookups that fail to link. |
-| MIPS (MIPSII, MIPSII_FP, MIPSIV, MIPSIV_FP, MIPS16) | 4.0–6.0 | Platform default; no `__stdcall` |
-| SuperH (SH3, SH4) | 4.0–6.0 (H/PC, handhelds) | Platform default; no `__stdcall` |
-
-The `WINAPI` macro in `include/akari/compiler.h` expands to
-`__attribute__((stdcall))` **only** for desktop (non-CE) 32-bit x86
-Win32.  For `_WIN32_WCE` and every other supported architecture it is
-empty.
-
-Select a target with `CROSS=`:
-
-```sh
-make CROSS=armv4-wince-     # ARMv4  (Pocket PC 2003 / Windows Mobile 2003)
-make CROSS=armv5-wince-     # ARMv5  (CE 5 / Windows Mobile 5)
-make CROSS=armv7-wince-     # ARMv7 Thumb2  (CE 6 / Windows Mobile 6.5)
-make CROSS=i686-wince-      # x86    (CEPC / DeviceEmulator)
-make CROSS=mips-wince-      # MIPS
-make CROSS=sh4-wince-       # SuperH 4
-```
-
----
+| ARM v4–v7 (ARM or Thumb state, incl. Thumb-2) | 4.x–6.x | built & link-verified (this toolchain) |
+| x86 (i486+, CEPC / emulator) | 4.x–6.x | built & link-verified (this toolchain) |
+| MIPS (MIPSII/IV) | 4.x–6.x | source-ready; not yet built (toolchain lacks the target in the verified snapshot) |
+| SuperH (SH3/SH4) | 4.x–6.x | source-ready; not yet built (toolchain lacks the target in the verified snapshot) |
 
 ## Build products and how to link them
 
 ```
-build/libakari.a         Data globals (__argc/__argv/...), .init_array/
-                         .fini_array runners, weak default WinMain/DllMain.
-build/akari_crt0.o       ALL five EXE entry points.  Link this once into
-                         any EXE.
-build/akari_dllcrt.o     _DllMainCRTStartup.  Link this once into any DLL.
-build/akari_crt0w.o      Backward-compat alias (byte-identical to akari_crt0.o).
-build/akari_crt0c.o      Backward-compat alias (byte-identical to akari_crt0.o).
+build/libakari.a         runtime.c: data globals, parser, narrow-argv
+                         synthesis, ctor/dtor runners, ___main hook.
+build/akari_crt0.o       EXE entry points (4 + 4 x86 aliases).
+build/akari_dllcrt.o     DLL entry points + weak DllMain.
+build/akari_crt0w.o, akari_crt0c.o
+                         byte-identical copies of akari_crt0.o kept for
+                         compatibility with older link lines.
 ```
 
-**Why `libakari.a` + separate startup objects, not a single archive?**
-Because PE entry points are not referenced from anywhere else in the link
-unit; if they lived only inside an archive the linker would not pull them
-in without an explicit `-u <symbol>` or `/ENTRY` hint.  This matches the
-layout of every other CRT (glibc `crt1.o`, msvcrt `crt0.obj`, mingwrt
-`crt0.o`, ...): the entry-point object is linked explicitly, and the
-archive provides everything else.
+Entry points live in explicitly-linked objects (not in the archive)
+because nothing references them from within the link unit — this matches
+how every CRT ships `crt0`-style objects.  The runtime support is the
+archive, linked by both EXEs and DLLs.
 
-`akari_crt0.o` contains **all five entry points** in a single TU; the
-linker discards unreferenced ones via `-ffunction-sections`/`--gc-sections`.
-There is no longer any code duplication between `crt0.o`/`crt0w.o`/`crt0c.o`
-— the `w`/`c` files are installed as byte-identical copies for makefile
-compatibility only.
-
-### Typical link line (ARMv7 Thumb2, CE 6 / Windows Mobile 6.x)
+### Building
 
 ```sh
-clang --target=thumbv7-unknown-windows-gnu \
-      -fuse-ld=lld \
-      -Wl,--gc-sections \
-      -I<your-sdk>/include \
-      -Wl,-subsystem:windowsce:9.0 \
-      -Wl,-entry:WinMainCRTStartup \
-      your_code.o \
-      <prefix>/lib/akari_crt0.o \
-      -L<prefix>/lib -lakari \
-      -L<your-sdk>/lib -lcoredll \
-      -lc++ -lc++abi -lunwind \
+make                                # TARGET defaults to armv7-unknown-windows-gnu
+make TARGET=i686-unknown-windows-gnu
+make TARGET=armv7-unknown-windows-gnu ARCHFLAGS=-mthumb   # Thumb-2
+make CC=/path/to/clang AR=/path/to/llvm-ar                # non-PATH tools
+```
+
+### Linking an EXE (verified end-to-end with clang + lld 22.1.8)
+
+```sh
+clang --target=armv7-unknown-windows-gnu -fuse-ld=lld -nostdlib \
+      -Wl,--subsystem=windowsce:5.02 -Wl,--entry=mainACRTStartup \
+      your_code.o akari_crt0.o -L. -lakari -L<sdk>/lib -lcoredll \
       -o your.exe
 ```
 
-For a DLL replace `akari_crt0.o` with `akari_dllcrt.o`, drop
-`-Wl,-entry:...` (the linker will find `_DllMainCRTStartup` by default),
-and add `-shared`.
+* Choose the entry by what the app defines: `mainACRTStartup` for
+  `main()`, `mainWCRTStartup` for `wmain()`, `WinMainCRTStartup` /
+  `wWinMainCRTStartup` for `WinMain` / `wWinMain`.  Any of the four works
+  regardless of the user function (each falls through to the others),
+  but the documented convention pairs them as above.
+* There is deliberately **no** `mainCRTStartup`: Microsoft's CE
+  documentation ("Linking to the CRT", "/ENTRY", Windows CE 5.0) assigns
+  `main()` programs to `mainACRTStartup`.
+* A DLL links `akari_dllcrt.o` instead and can omit `--entry` — lld's
+  default DLL-entry search finds `DllMainCRTStartup`.
+* If you do not link a C library, `exit` is unresolved-weak and the
+  entry falls back to `ExitProcess` directly.
 
-Subsystem versions:
-| Value | OS |
-|---|---|
-| `-Wl,-subsystem:windowsce:4.0` | Windows CE 4.0 / .NET |
-| `-Wl,-subsystem:windowsce:5.0` | Windows CE 5.0 |
-| `-Wl,-subsystem:windowsce:5.01` | Windows CE 5.01 (Windows Mobile 5) |
-| `-Wl,-subsystem:windowsce:5.02` | Windows CE 5.02 (Windows Mobile 6 Standard) |
-| `-Wl,-subsystem:windowsce:9.0`  | Windows CE 6.x / Windows Mobile 6.x |
+Subsystem: pass `--subsystem=windowsce:<ver>` (verified: 5.02 → header
+`IMAGE_SUBSYSTEM_WINDOWS_CE_GUI`, major 5, minor 2).  Use 4.0/5.0/5.01/
+5.02/9.0 for CE 4.0/5.0/5.01/5.02/6.x images.
 
-x86 CE: replace `--target=thumbv7-unknown-windows-gnu` with
-`--target=i686-unknown-windows-gnu`; all other flags are identical.
-
-Notes:
-* Do not pass `-nostdlib` unless you also explicitly link
-  `libclang_rt.builtins-<arch>.a` — clang adds compiler-rt automatically
-  and Akari needs `__chkstk`, `__aeabi_*`, etc., from it.
-* Stack protection (`-fstack-protector`) must NOT be enabled for Akari's
-  own startup files (the Makefile already passes `-fno-stack-protector`);
-  your application code can use it freely — `__stack_chk_guard` and
-  `__stack_chk_fail` come from libc.
-* `__cxa_atexit` / `__cxa_finalize` are part of libc++abi and libc.
-  Akari calls libc `exit()`, which is responsible for calling
-  `__cxa_finalize(NULL)` to run all registered static destructors before
-  invoking `ExitProcess`.  You do not need any extra glue.
-
-### Host-side build check
+## Host-side checks (no cross toolchain needed)
 
 ```sh
-make hostcheck
+make check      # hostcheck + hosttest
 ```
 
-compiles both TUs warning-free with host `gcc` at `-Wall -Wextra -Wshadow
--Wstrict-prototypes -Wmissing-prototypes -std=c99` and archives them.
-
----
+`hostcheck` compiles every TU warning-free with the host `cc` and
+archives them.  `hosttest` builds and **runs** `tests/host/test_main.c`
+together with `runtime.c` (host stubs stand in for the coredll imports):
+it feeds the parser the documented examples (quotes, backslash
+`2n`/`2n+1`-before-quote, `""`-inside-quotes, unterminated quotes,
+leading whitespace, empty command line → executable path) and checks
+`__argc`/`__wargv`/`__argv`/`_wcmdtail` plus both wide→narrow conversion
+modes — currently `all 90 checks passed`.
 
 ## Repository layout
 
 ```
-include/akari/compiler.h   Compiler macros (NORETURN/WEAK/USED/AKARI_DLLIMPORT/WINAPI).
-                           WINAPI expands to nothing on Windows CE.
-include/akari/crt.h        Declares the MSVCRT data globals Akari defines.
-src/crt/crt0.c             EXE entry points: WinMainCRTStartup / wWinMainCRTStartup /
-                           mainCRTStartup / mainWCRTStartup / mainACRTStartup, plus
-                           CommandLineToArgvW-compatible parser, WideCharToMultiByte
-                           narrow-argv synthesis, .init_array/.ctors dispatch.
-src/crt/dllcrt.c           DLL entry point: _DllMainCRTStartup with DisableThreadLibraryCalls,
-                           .init_array on ATTACH, .fini_array on DETACH, weak DllMain.
+include/akari/compiler.h   GNU/Clang attribute macros, AKARI_ENTRY asm-label
+                           pinning, AKARI_DLLIMPORT, WINAPI (empty on CE),
+                           AKARI_CPU_X86, NULL.
+include/akari/crt.h        PUBLIC data-global declarations (MSVCRT model).
+include/akari/internal.h   PRIVATE shared declarations (not installed).
+src/crt/runtime.c          Data globals, command-line parser + narrow-argv
+                           synthesis, .CRT$X* bookends, GNU-list runners,
+                           weak ___main hook, coredll import declarations.
+src/crt/crt0.c             EXE entries + x86 underscore aliases; weak user
+                           main/WinMain detection; dtors + exit hand-off.
+src/crt/dllcrt.c           _DllMainCRTStartup + DllMainCRTStartup alias,
+                           weak DllMain default.
+tests/host/test_main.c     Host parser self-test (see above).
 ```
 
----
+## Design notes
 
-## Per-topic design notes
+### Entry dispatch and startup order (EXE)
 
-### `WinMain` `lpCmdLine` is the raw tail, not a re-joined argv
+Each EXE entry runs: parse command line → run constructors → call user
+function → run destructors → hand off to the C library's `exit()` (or
+fall back to `ExitProcess`).  `envp` is always `NULL` (Windows CE has no
+POSIX environment block).  `WinMain`'s `lpCmdLine` is `_wcmdtail`: a
+pointer into the raw wide command line just past the argv[0] token
+(Win32 convention — not a re-joined copy of argv), and `hPrevInstance`
+is `0` per the CE WinMain documentation.
 
-Desktop Win32 and Windows CE both pass `lpCmdLine` as a pointer into the
-raw `GetCommandLineW()` buffer, pointing at the first unquoted whitespace
-*after* the program-name token — preserving whatever arbitrary spacing
-the launcher supplied.  Akari reproduces this exactly: `_wcmdtail` is
-set by rescanning the raw command line past argv[0] without allocating
-or copying.  If you want a tokenised argument list use `__argc`/`__wargv`.
+### DLL attach/detach order
 
-### Backslash/quote parsing
+Per Microsoft's CE "Run-time Library Behavior" documentation: on
+`DLL_PROCESS_ATTACH`, global constructors run **first**, then the user
+`DllMain`; on `DLL_PROCESS_DETACH`, the user `DllMain` runs first, then
+the destructors (the documented reverse).  `__dso_handle` is set to the
+module handle on attach so destructor registration can be scoped to the
+image.  Thread attach/detach and unknown reasons are forwarded to
+`DllMain`; the CRT does no per-thread work of its own.
 
-The parser implements CommandLineToArgvW exactly:
-* `2n` backslashes before `"` → `n` literal backslashes, toggle quoting.
-* `2n+1` backslashes before `"` → `n` backslashes + one literal `"`.
-* `""` *inside* a quoted range → one literal `"`.
-* Whitespace outside quotes separates arguments.
+### Command-line parsing rules
 
-### ANSI code-page conversion for `__argv`
+The parser implements the rules Microsoft documents for command-line
+parsing (CommandLineToArgvW / "Parsing C command-line arguments"):
+space/tab delimit arguments outside quotes; inside quotes whitespace is
+ordinary text; `2n` backslashes before `"` yield `n` backslashes and a
+mode-toggling quote; `2n+1` yield `n` backslashes plus a literal `"`;
+`""` inside a quoted region is one literal quote; an unterminated quoted
+region runs to end of string; a line starting with whitespace yields an
+empty argv[0]; an empty command line yields argv[0] = the executable's
+full path (CommandLineToArgvW semantics).  A counting pass and a
+materializing pass share one code path so they cannot disagree.  Storage
+comes from `LocalAlloc(LPTR)` (one block per image, no libc).
 
-`__argv` / `_acmdln` are narrow (`char`) strings for source compatibility
-with legacy code that expects `main(int, char **)`.  They are converted
-with `WideCharToMultiByte(CP_ACP)` if the function is available from
-coredll; if it is not (kernel-only headless images) we fall back to a
-lossy 7-bit-passthrough, non-ASCII→`'?'` conversion.  New code should
-always walk `__wargv` for correct Unicode handling.
+### Wide and narrow argv
 
-### envp
+Windows CE is Unicode-native; `__wargv`/`_wcmdln` are the raw wide
+forms.  `__argv`/`_acmdln` are synthesized with
+`WideCharToMultiByte(CP_ACP)` resolved through `GetModuleHandleW(L"coredll.dll")`
++ `GetProcAddress` (some OEM images cut optional modules); when the
+converter is missing, a lossy 7-bit passthrough (`>0x7F` → `'?'`) is
+used instead, and both paths are exercised by the host self-test.
 
-Windows CE has no POSIX environment block — no `environ`, no
-`getenv`/`setenv`, no `GetEnvironmentStrings`.  The third argument to
-`main` is always `NULL`.
+### Constructor/destructor lists (verified layout)
 
-### `.init_array` / `.ctors` execution order
+Clang for `*-windows-gnu` emits GNU-style `.ctors`/`.dtors` sections
+(not `.init_array`/`.fini_array`).  lld concatenates the per-object
+sections in link order, bracketed by a `-1` header and a `0` terminator,
+and defines `__CTOR_LIST__`/`__DTOR_LIST__`.  Verified with
+`llvm-readobj`/`llvm-objdump` on i686 and ARMNT images (one and two
+objects, one and several entries per object): per-object words are
+stored in **reverse source order**.  Akari therefore walks
+`__CTOR_LIST__` **backward** (per-object source order; objects in
+reverse link order — the historical GNU convention) and `__DTOR_LIST__`
+**forward**, which is the exact mirror: destructors always run
+last-constructed-first, both within an object and across objects.
+Because lld points the list symbol at the `-1` header on i686 but at the
+first real word on ARMNT (several entries), the walker skips a `-1`
+only when it is actually at `l[0]`; every observed shape is covered.
 
-* `.init_array` entries are emitted in forward order and run from low
-  address to high address (System V ABI).
-* `.ctors` entries (legacy list) are emitted in reverse order under the
-  GCC sentinel convention and are invoked from the end of the list
-  backwards.
-* `.fini_array` (DLL only) is invoked in reverse order (LIFO) on
-  `DLL_PROCESS_DETACH`, matching `__cxa_atexit` semantics.
+MS-style objects (clang-cl, `-fms-compatibility`) place initializer
+pointers in `.CRT$XI*`/`.CRT$XC*` sections instead.  Akari ships the
+`.CRT$XIA`/`.CRT$XIZ` and `.CRT$XCA`/`.CRT$XCZ` NULL bookends in
+`runtime.c` and walks those ranges first-to-last (lld orders the
+`.CRT$X*` family by section name).  Mechanisms are no-ops when their
+tables are empty, so mixed-style links stay well-defined.
 
-### DLL TLS callbacks and thread notifications
+### Stack protection, builtins, C++
 
-Akari calls `DisableThreadLibraryCalls` on `DLL_PROCESS_ATTACH`.  This
-suppresses DLL_THREAD_ATTACH/DETACH calls for all subsequently created
-threads — these notifications are slow on CE and the CRT needs no
-per-thread bookkeeping.  Consumers that require per-thread hooks must
-use **PE/COFF TLS callbacks** (declared via `__declspec(thread)` or the
-`.tls` directory), which the OS invokes before `_DllMainCRTStartup`;
-that mechanism is the linker's responsibility, not the CRT's.
+Akari compiles its own TUs with `-fno-stack-protector` (no guard exists
+before the C library initializes it) and `-fno-builtin` +
+`-nostdlibinc` (it is the layer below any hosted runtime).  Note: do
+**not** add `-ffreestanding` — Clang 22.x ARM `windows-gnu` emits
+invalid `.seh` sequences for `-ffreestanding` code at `-Os` (verified;
+see below).  `__cxa_atexit`/`__cxa_finalize` and static-destructor
+finalization belong to libc++abi/libc; Akari's destructor runner only
+covers the `.dtors` list Clang emits for GNU-style C `__attribute__((destructor))`
+and (with libc++abi) never double-runs `__cxa_finalize`.
 
-### DLL_PROCESS_DETACH shutdown order
+### Empty constructor functions
 
-On detach we call `DllMain(hDll, DLL_PROCESS_DETACH, …)` FIRST, then run
-`.fini_array` destructors in reverse order.  Destructors therefore see
-all of the DLL's own code and data still mapped.  `__cxa_finalize` for
-static C++ objects inside the DLL is the C++ runtime's responsibility
-(libc++abi calls it from its own `.fini_array` callback or via a DllMain
-hook).  Akari does not call `__cxa_finalize` directly because doing so
-on process exit would double-run destructors (libc `exit()` already
-invokes them).
-
-### `setjmp`/`longjmp`
-
-Provided by libc (coredll exports `_setjmp`/`longjmp` at fixed ordinals
-on ARM CE; they are compatible with the ARM EHABI unwinding tables that
-llvm-libunwind processes).  Akari does not redefine them.
-
-### libc++abi / llvm-unwind on Windows CE ARM
-
-libc++abi's ARM EHABI personality (`__gxx_personality_v0`) and
-llvm-libunwind's `.pdata`/`.xdata` unwinder work on Windows CE as long
-as the linker emits correct EH tables — lld for the `*-windows-gnu`
-triple does.  No Akari code is in the exception path.
-
-### lld subsystem and entry point
-
-`-Wl,-subsystem:windowsce:<ver>` sets the PE Subsystem field to 9
-(Windows CE) and the MajorSubsystemVersion/MinorSubsystemVersion to the
-version you request.  `-Wl,-entry:<name>` selects the entry-point symbol;
-Akari exposes all five canonical names.  There is no linker script.
-
----
+Clang at `-Os` removes empty `__attribute__((constructor))` functions
+together with their `.ctors` entries (observed in IR: the
+`llvm.global_ctors` array becomes empty).  This is normal optimization
+and irrelevant to real code, whose constructors have side effects; it
+only matters if you probe list layouts with empty bodies (use `-O0` or
+side-effecting bodies).
 
 ## Clean-room status
 
-Akari is written from scratch, clean-room, under the MIT license.  **No
-code from msvcrt.dll, ucrt, mingw-w64, mingwrt, cegcc/mingw32ce,
-w32api, newlib, glibc, dietlibc, or musl was copied, adapted, or
-consulted during implementation.**  Public information sources were
-limited to:
+Akari is written from scratch under the MIT license.  No code from
+msvcrt/ucrt, MinGW-w64/mingwrt, CeGCC/mingw32ce, w32api, newlib, glibc,
+musl, or any third-party OSS CRT was copied, ported, or adapted, and no
+third-party code was combined into these implementations.  Design
+decisions are grounded in official public information only:
 
-* ISO C99 / C11 and the Itanium C++ ABI specification.
-* Microsoft's public documentation: PE/COFF specification, Win32 API
-  reference for the handful of coredll entry points Akari calls
-  (`GetModuleHandleW`, `GetCommandLineW`, `LocalAlloc`, `LocalFree`,
-  `DisableThreadLibraryCalls`, `WideCharToMultiByte`), `WinMain`/
-  `DllMain` signatures, and the CommandLineToArgvW parsing rules.
-* Publicly visible coredll.dll ordinal listings, used only to confirm
-  which symbols are exported by the OS and therefore must NOT be
-  defined by Akari.
+* Microsoft's public documentation: PE/COFF format; "Linking to the CRT
+  (Windows CE 5.0)", "/ENTRY (Windows CE 5.0)", "Run-time Library
+  Behavior (Windows CE 5.0)", `WinMain`/`DllMain`/`GetCommandLine`
+  (CE), `CommandLineToArgvW`/parsing rules, `WideCharToMultiByte`,
+  `LocalAlloc`/`LocalFree`;
+* ARM/LLVM/Clang/LLD documentation and the observable output of the
+  official toolchain (see below).
+
+### Verified toolchain behavior (clang/LLD 22.1.8 snapshot)
+
+* All TUs compile warning-free at `-Wall -Wextra -Wshadow
+  -Wstrict-prototypes -Wmissing-prototypes` for `armv7-unknown-windows-gnu`
+  (ARM and `-mthumb` Thumb-2) and `i686-unknown-windows-gnu`.
+* End-to-end links (clang driver and direct `ld.lld`):
+  * EXE: `crt0.o + runtime.o + coredll import lib` →
+    `IMAGE_FILE_MACHINE_ARMNT`/`I386`, subsystem `WINDOWS_CE_GUI` (9),
+    5.02; imports exactly `ExitProcess` + `GetCommandLineW`,
+    `GetModuleFileNameW`, `GetModuleHandleW`, `GetProcAddress`,
+    `LocalAlloc`, `LocalFree` — no desktop-API imports.
+  * DLL: `dllcrt.o + runtime.o` links with the default entry search
+    (`DllMainCRTStartup`), no `ExitProcess` import.
+* Entry resolution, `___main` injection on i686, and the list layouts
+  described above were confirmed with `llvm-readobj` on the linked
+  images.
+* The host self-test (`make hosttest`) runs the parser against the
+  documented rules on the host.
+
+## Known verification gaps
+
+* MIPS/SH: not yet built in this snapshot (no such target in the
+  downloaded LLVM build); the sources contain no ISA-specific code.
+* No Windows CE device/emulator runtime was available: entry-point
+  execution is verified to the OS loader boundary (headers, entry
+  symbols, imports, list layouts), not by running images on CE 4/5/6.
+* Per-CE-version coredll export coverage of the imported APIs is
+  audited against official SDK documentation; images that cut optional
+  modules are handled defensively at runtime (see the `WideCharToMultiByte`
+  fallback above).
 
 ## License
 
-MIT — see the copyright notice at the top of each source file and the
-LICENSE file.
+MIT — see the notice at the top of each file and the LICENSE file.
 
-&copy; 2026 Akari CRT contributors.
+© 2026 Akari CRT contributors.

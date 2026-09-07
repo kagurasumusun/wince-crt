@@ -3,81 +3,109 @@
  * Copyright (c) 2026 Akari CRT contributors
  * SPDX-License-Identifier: MIT
  *
- * compiler.h -- Compiler/architecture macros used across the CRT.
+ * compiler.h -- compiler/architecture feature macros for the CRT.
  *
- * Clean-room; written against Clang/GCC documentation and the
- * Windows CE ABI.
+ * Design basis (clean-room; no third-party CRT code consulted):
+ *  - Microsoft "Linking to the CRT (Windows CE 5.0)" and "/ENTRY
+ *    (Windows CE 5.0)" documentation, which specify the CE entry-point
+ *    names and require that entry functions and the functions they
+ *    call be defined with the __cdecl calling convention.
+ *  - Microsoft C-language documentation on __cdecl/__stdcall name
+ *    decoration (x86: leading underscore for C names; __stdcall adds
+ *    @n, which Windows CE does not use).
+ *  - GNU/Clang "asm labels" documentation for pinning COFF symbol
+ *    names, and the MSVC x86 convention that C symbols carry a
+ *    leading underscore.
+ *
+ * The macro set is deliberately small.  Everything that is truly
+ * CPU-specific (parameter passing, stack layout, EH tables) belongs
+ * to clang's target code generation and to lld, not to this header.
  */
 #ifndef _AKARI_COMPILER_H_
 #define _AKARI_COMPILER_H_
 
 #if defined(__GNUC__) || defined(__clang__)
-#  define NORETURN       __attribute__((noreturn))
-#  define WEAK           __attribute__((weak))
-#  define USED           __attribute__((used))
-#  define SECTION(x)     __attribute__((section(x)))
-#  define NOINLINE       __attribute__((noinline))
-#  define AKARI_ALIGN(x) __attribute__((aligned(x)))
 
-/* DLL import/export markers.  On COFF these produce the
- * __imp_<name> stubs that lld's auto-import resolves.  On hostcheck
- * they expand to nothing. */
+#  define NORETURN        __attribute__((noreturn))
+#  define WEAK            __attribute__((weak))
+#  define USED            __attribute__((used))
+#  define SECTION(x)      __attribute__((section(x)))
+#  define AKARI_ALIGN(x)  __attribute__((aligned(x)))
+
+/* NOTE on placement: attach NORETURN/WEAK to *declarations* (put the
+ * macro after the declarator of a prototype); applying noreturn on a
+ * function *definition* triggers a -Wgcc-compat warning in Clang. */
+
+/* AKARI_ENTRY(label): pin a function's COFF symbol name to the exact
+ * PE/COFF entry-point spelling, independent of the C-name mangling
+ * convention of the target (i386 windows-gnu prefixes C names with an
+ * underscore; ARM does not).  Must be written AFTER the declarator:
+ *
+ *     void WinMainCRTStartup(void) AKARI_ENTRY("WinMainCRTStartup");
+ *     void WinMainCRTStartup(void) { ... }
+ *
+ * (GNU asm labels attach to the declaration they appear in; the
+ * attribute-in-the-middle spelling does not compile with Clang.)
+ * On host-side build checks the label is dropped. */
+#  if defined(_WIN32) || defined(_WIN64)
+#    define AKARI_ENTRY(label) __asm__(label)
+#  else
+#    define AKARI_ENTRY(label)
+#  endif
+
+/* AKARI_DLLIMPORT: __declspec(dllimport).  Functions imported from
+ * coredll.dll are referenced through the __imp_<name> pointer slot,
+ * which the consumer's coredll.lib import library resolves.  On
+ * non-Windows host builds (compile checks only) it expands to
+ * nothing. */
 #  if defined(_WIN32) || defined(_WIN64)
 #    define AKARI_DLLIMPORT __attribute__((dllimport))
-#    define AKARI_DLLEXPORT __attribute__((dllexport))
 #  else
 #    define AKARI_DLLIMPORT
-#    define AKARI_DLLEXPORT
 #  endif
 
-/* WINAPI -- the calling convention for Win32 API callbacks.
+/* WINAPI -- calling convention of Windows API entry points.
  *
- * On DESKTOP Win32 (non-CE, 32-bit x86) this is __stdcall (callee-
- * pops, @N decoration).  On WINDOWS CE this is the platform default
- * C convention on every architecture:
- *   - ARM (AAPCS): only one convention.
- *   - x86 CE: coredll exports are __cdecl (NO @N decorations).
- *   - MIPS / SH: only one convention.
+ * Desktop Win32 (non-CE, 32-bit x86) uses __stdcall; every CE
+ * architecture uses the plain C convention:
+ *   - ARM / Thumb (CE 4-6): single register-based convention; the
+ *     Microsoft CE "/ENTRY (Windows CE 5.0)" topic requires entry
+ *     functions to be __cdecl, which on ARM is the only convention.
+ *   - x86 CE: Microsoft's CE documentation states the CRT entry
+ *     functions (WinMain, wWinMain, DllMain, and the *CRTStartup
+ *     functions that call them) must be defined __cdecl, i.e. the
+ *     callee does NOT pop arguments and C names are decorated only
+ *     with a leading underscore (no @n stdcall decoration).
+ *   - MIPS / SuperH: single register-based convention.
  *
- * We therefore expand WINAPI to __stdcall ONLY for non-CE 32-bit
- * x86 desktop targets.  On every supported CE architecture it is
- * empty.
- */
-#  if defined(_WIN32) && !defined(_WIN32_WCE) && (defined(__i386__) || defined(_M_IX86))
+ * Hence WINAPI expands to __stdcall ONLY on desktop 32-bit x86 and
+ * to nothing everywhere else.  Consumers targeting CE must define
+ * _WIN32_WCE (their SDK headers require it anyway); the CRT build
+ * passes -D_WIN32_WCE=<ver> itself. */
+#  if defined(_WIN32) && !defined(_WIN32_WCE) && \
+      (defined(__i386__) || defined(_M_IX86))
 #    define WINAPI __attribute__((stdcall))
 #  else
-#    define WINAPI /* nothing */
+#    define WINAPI
 #  endif
 
-/* Pin entry-point symbol names to the undecorated names the PE/COFF
- * loader expects, regardless of the target C-mangling convention.
- * On i386 windows-gnu, clang prepends an underscore to extern "C"
- * symbols; using __asm__(name) forces the correct plain name so the
- * loader can resolve -Wl,-entry:WinMainCRTStartup without the
- * consumer having to add a leading underscore on x86.
- *
- * We only apply the asm label on actual Windows builds; on hostcheck
- * we leave names as-is (no need for the PE convention). */
-#  if defined(_WIN32) || defined(_WIN64)
-#    define AKARI_ENTRY(name) __asm__(name)
+/* Which CPU family we are on (for x86-only alias spellings of the
+ * entry names, mirroring the eVC/older CE x86 tools' leading
+ * underscore). */
+#  if defined(__i386__) || defined(_M_IX86)
+#    define AKARI_CPU_X86 1
 #  else
-#    define AKARI_ENTRY(name)
+#    define AKARI_CPU_X86 0
 #  endif
-#else
-#  error "Akari requires Clang or GCC.  The supported toolchain is LLVM/Clang/lld."
-#endif
 
-/* Default _WIN32_WCE baseline.  Consumers can override with
- * -D_WIN32_WCE=0x501 etc. on the command line. */
-#if defined(_WIN32) && !defined(_WIN32_WCE) && !defined(_WIN32_WINNT) && !defined(_DEBUG_HOSTCHECK_)
-#  define _WIN32_WCE 0x0400
+#else
+#  error "Akari requires Clang or GCC."
 #endif
 
 #ifndef NULL
-#  define NULL ((void*)0)
+#  define NULL ((void *)0)
 #endif
 
-/* Extern "C" guards for headers. */
 #ifdef __cplusplus
 #  define AKARI_BEGIN_EXTERN_C extern "C" {
 #  define AKARI_END_EXTERN_C   }
