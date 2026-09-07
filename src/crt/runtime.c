@@ -97,14 +97,28 @@ typedef int (*w2m_fn)(akari_dword, akari_dword,
  * through the import library of their platform SDK (coredll.lib).    */
 /* ------------------------------------------------------------------ */
 
-AKARI_DLLIMPORT akari_handle GetModuleHandleW(const akari_wchar *);
-AKARI_DLLIMPORT akari_wchar *GetCommandLineW(void);
+/* The coredll import declarations below pin their COFF symbol names
+ * with asm labels: coredll export names carry no x86 C-name
+ * decoration (the sysroot import libraries define __imp_<name> with
+ * the undecorated name for every architecture), so the references
+ * must not pick up the target's leading-underscore decoration. */
+AKARI_DLLIMPORT akari_handle GetModuleHandleW(const akari_wchar *)
+    __asm__("GetModuleHandleW");
+AKARI_DLLIMPORT akari_wchar *GetCommandLineW(void)
+    __asm__("GetCommandLineW");
 AKARI_DLLIMPORT akari_dword GetModuleFileNameW(akari_handle,
                                                akari_wchar *,
-                                               akari_dword);
-AKARI_DLLIMPORT void *LocalAlloc(akari_dword, size_t);
-AKARI_DLLIMPORT void LocalFree(void *);
-AKARI_DLLIMPORT void *GetProcAddress(akari_handle, const char *);
+                                               akari_dword)
+    __asm__("GetModuleFileNameW");
+AKARI_DLLIMPORT void *LocalAlloc(akari_dword, size_t)
+    __asm__("LocalAlloc");
+AKARI_DLLIMPORT void LocalFree(void *) __asm__("LocalFree");
+/* coredll exports GetProcAddress only in its W spelling on every CE
+ * generation (verified against the CE 4/5/6 import libraries of the
+ * toolchain sysroot); SDK headers map GetProcAddress ->
+ * GetProcAddressW the same way. */
+AKARI_DLLIMPORT void *GetProcAddressW(akari_handle, const akari_wchar *)
+    __asm__("GetProcAddressW");
 
 /* ------------------------------------------------------------------ */
 /* Per-module data objects (MSVCRT data model; see crt.h).            */
@@ -380,6 +394,10 @@ static void resolve_w2m(void)
     static const akari_wchar module_name[] = {
         'c', 'o', 'r', 'e', 'd', 'l', 'l', '.', 'd', 'l', 'l', 0
     };
+    static const akari_wchar w2m_name[] = {
+        'W', 'i', 'd', 'e', 'C', 'h', 'a', 'r', 'T', 'o',
+        'M', 'u', 'l', 't', 'i', 'B', 'y', 't', 'e', 0
+    };
     akari_handle core;
     void *addr;
 
@@ -390,7 +408,7 @@ static void resolve_w2m(void)
     if (!core) {
         return;
     }
-    addr = GetProcAddress(core, "WideCharToMultiByte");
+    addr = GetProcAddressW(core, w2m_name);
     g_w2m = (w2m_fn) (uintptr_t) addr;
 }
 

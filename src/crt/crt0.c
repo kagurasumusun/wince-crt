@@ -40,9 +40,10 @@
  *   4. call the user entry function;
  *   5. run global destructors, then hand off to the C library's
  *      exit() so libc-owned termination (atexit/__cxa_finalize,
- *      stdio flush) runs before ExitProcess; if no libc exit() is
- *      linked, fall back to ExitProcess directly so the entry point
- *      can never return into the loader.
+ *      stdio flush) runs before the process is terminated; if no libc
+ *      exit() is linked, terminate the process directly
+ *      (TerminateProcess) so the entry point can never return into
+ *      the loader.
  *
  * Scope: this file is startup glue only -- no libc functions are
  * implemented here (see README for the responsibility table).
@@ -61,7 +62,23 @@ typedef akari_dword  DWORD_T;
 
 #define SW_SHOW 1
 
-AKARI_DLLIMPORT void ExitProcess(akari_dword) NORETURN;
+/* Process termination on Windows CE.
+ *
+ * coredll does NOT export ExitProcess (it is absent from every CE
+ * coredll export set -- verified against the CE 4/5/6 coredll import
+ * libraries of the toolchain sysroot; Microsoft's ExitProcess
+ * documentation covers desktop Windows only).  The CE termination
+ * call is TerminateProcess, which coredll does export on every CE
+ * generation.  Its first argument is the handle of the process to
+ * end; for the calling process the CE system-handle space defines a
+ * fixed pseudo-handle for "the current process" (SDK kfuncs.h:
+ * GetCurrentProcess() = SH_CURPROC(2) + SYS_HANDLE_BASE(64) = 66;
+ * the value 66 was also observed in the compiled CE CRT objects of
+ * the toolchain sysroot). */
+#define AKARI_CURRENT_PROCESS ((akari_handle) (uintptr_t) 66u)
+
+AKARI_DLLIMPORT int TerminateProcess(akari_handle, akari_dword)
+    __asm__("TerminateProcess");
 
 /* C library exit(); imported weakly: the consumer's C library (which
  * owns atexit/__cxa_finalize and the final process exit) provides the
@@ -93,7 +110,7 @@ static void os_exit(int rc)
         /* not reached when a correct libc is linked */
     }
     for (;;) {
-        ExitProcess((akari_dword) rc);
+        TerminateProcess(AKARI_CURRENT_PROCESS, (akari_dword) rc);
     }
 }
 

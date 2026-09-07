@@ -109,11 +109,21 @@ void LocalFree(void *p)
     free(p);
 }
 
-void *GetProcAddress(akari_handle h, const char *name)
+void *GetProcAddressW(akari_handle h, const akari_wchar *name)
 {
+    static const akari_wchar w2m_name[] = {
+        'W', 'i', 'd', 'e', 'C', 'h', 'a', 'r', 'T', 'o',
+        'M', 'u', 'l', 't', 'i', 'B', 'y', 't', 'e', 0
+    };
+    size_t i;
     (void) h;
-    if (!g_no_w2m && strcmp(name, "WideCharToMultiByte") == 0) {
-        return (void *) (uintptr_t) (uintptr_t) w2m_stub;
+    for (i = 0; name[i] && w2m_name[i]; i++) {
+        if (name[i] != w2m_name[i]) {
+            break;
+        }
+    }
+    if (!g_no_w2m && name[i] == 0 && w2m_name[i] == 0) {
+        return (void *) (uintptr_t) w2m_stub;
     }
     return NULL;
 }

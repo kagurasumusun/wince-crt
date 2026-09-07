@@ -46,7 +46,7 @@ WinCE driver.
 | C/C++ initializers: `.CRT$XI*` / `.CRT$XC*` (clang-cl objects) first-to-last, then the `.ctors` list (`__CTOR_LIST__`); destructors from the `.dtors` list | **Akari** | ✅ |
 | Weak user-entry fallbacks (`DllMain` default in the DLL object; missing `main`/`WinMain` detected at runtime) | **Akari** | ✅ |
 | x86 `___main` hook (only i686 `windows-gnu` clang makes `main()` call it; here it is a no-op because entry points already ran constructors) | **Akari** | ✅ |
-| Process exit: call the C library's `exit()` when one is linked (atexit/`__cxa_finalize`/stdio flush happen there); direct `ExitProcess` only as a no-libc fallback | **Akari** (just the call) | ✅ |
+| Process exit: call the C library's `exit()` when one is linked (atexit/`__cxa_finalize`/stdio flush happen there); direct `TerminateProcess` on the current process only as a no-libc fallback (coredll exports no `ExitProcess` on any CE generation) | **Akari** (just the call) | ✅ |
 | C library (`malloc`/`printf`/`exit`/`atexit`/`abort`/`memcpy`/`setjmp`/errno/...) | **libc** (coredll msvcrt exports, newlib, llvm-libc...) | ❌ |
 | `__stack_chk_guard`/`__stack_chk_fail`, `__chkstk`, `__aeabi_*` builtins | **libc / compiler-rt** (clang links compiler-rt automatically) | ❌ |
 | `__cxa_atexit`/`__cxa_finalize`, `__cxa_pure_virtual`, `new`/`delete`, EH personality, RTTI | **libc++ / libc++abi** | ❌ |
@@ -143,8 +143,10 @@ lld-link -wince /subsystem:windowsce /entry:WinMainCRTStartup \
   CeGCC objects that reference DLL data without dllimport would need
   the mingwrt-style runtime support instead — outside Akari's scope.)
 * If you do not link a C library, `exit` is unresolved-weak and the
-  entry falls back to `ExitProcess` directly (weak externs resolve to
-  zero in lld-link; verified).
+  entry terminates the process directly via `TerminateProcess` (weak
+  externs resolve to zero in lld-link; verified).  coredll exports no
+  `ExitProcess` on any CE generation (see "coredll import surface"
+  below), so the fallback uses the CE-native termination call.
 
 Subsystem: `lld-link -wince` accepts `/subsystem:windowsce` and stamps
 subsystem 9 (`IMAGE_SUBSYSTEM_WINDOWS_CE_GUI`) with OS version 6.0 in
@@ -190,7 +192,7 @@ tests/host/test_main.c     Host parser self-test (see above).
 
 Each EXE entry runs: parse command line → run constructors → call user
 function → run destructors → hand off to the C library's `exit()` (or
-fall back to `ExitProcess`).  `envp` is always `NULL` (Windows CE has no
+fall back to `TerminateProcess` on the current process).  `envp` is always `NULL` (Windows CE has no
 POSIX environment block).  `WinMain`'s `lpCmdLine` is `_wcmdtail`: a
 pointer into the raw wide command line just past the argv[0] token
 (Win32 convention — not a re-joined copy of argv), and `hPrevInstance`
@@ -225,7 +227,8 @@ comes from `LocalAlloc(LPTR)` (one block per image, no libc).
 Windows CE is Unicode-native; `__wargv`/`_wcmdln` are the raw wide
 forms.  `__argv`/`_acmdln` are synthesized with
 `WideCharToMultiByte(CP_ACP)` resolved through `GetModuleHandleW(L"coredll.dll")`
-+ `GetProcAddress` (some OEM images cut optional modules); when the
++ `GetProcAddressW` (coredll exports `GetProcAddress` only in its W
+spelling; some OEM images cut optional modules); when the
 converter is missing, a lossy 7-bit passthrough (`>0x7F` → `'?'`) is
 used instead, and both paths are exercised by the host self-test.
 
@@ -328,14 +331,52 @@ driver and COFF/CE lld support).
   aliases; `.CRT$XIA/XIZ/XCA/XCZ` sentinel sections present.
 * End-to-end links with direct `lld-link -wince` (the driver's own
   link mode; it always prepends its CeGCC start files and ignores
-  `-nostdlib`, so Akari links bypass it):
-  * EXE (`crt0.o + runtime.o + user + link stubs`): machine ARM/I386,
+  `-nostdlib`, so Akari links bypass it) against the **real coredll
+  import libraries** of the toolchain sysroot (CE 6.0
+  `libcoredll6.a`, CE 5.0 `libcoredll.a`, CE 4.x `libcoredll4.a`,
+  x86 CE 6.0 `libcoredll6-x86.a`):
+  * EXE (`akari_crt0.o + libakari.a + user`): machine ARM/I386,
     subsystem `WINDOWS_CE_GUI` (9), OS version 6.0, entry resolved to
-    the requested CE entry; `.ctors` = `[-1, entries..., 0]`, `.CRT` =
-    the four NULL sentinels (plus sorted user entries when a clang-cl
-    object is present); no desktop-API imports beyond the coredll set.
-  * DLL (`dllcrt.o + runtime.o`, `/dll /entry:DllMainCRTStartup`):
-    links; subsystem 9.
+    the requested CE entry — `mainACRTStartup` (main app),
+    `WinMainCRTStartup` (WinMain app), `mainWCRTStartup` (wmain app);
+    `.ctors` = `[-1, entries..., 0]`, `.CRT` = the four NULL sentinels
+    (plus sorted user entries when a clang-cl object is present).
+  * DLL (`akari_dllcrt.o + libakari.a + user DllMain`,
+    `/dll /entry:DllMainCRTStartup`): links; subsystem 9.
+  * The image imports only the coredll functions the CRT and the app
+    actually use (`llvm-readobj --coff-imports`): the CRT's
+    `TerminateProcess`, `GetModuleHandleW`, `GetCommandLineW`,
+    `GetModuleFileNameW`, `GetProcAddressW`, `LocalAlloc`,
+    `LocalFree` — no desktop-API imports.
+* **coredll import surface** (verified against the CE 4/5/6 import
+  libraries of the sysroot): coredll exports no `ExitProcess` and no
+  undecorated `GetProcAddress` on any CE generation — process
+  termination is `TerminateProcess`, and the export is
+  `GetProcAddressW`/`GetProcAddressA` (SDK headers map
+  `GetProcAddress` to the W form).  coredll export names are also
+  **undecorated on x86** (the import libraries define
+  `__imp_<name>` without the x86 leading underscore), so Akari pins
+  every coredll import declaration with an asm label to the
+  undecorated spelling and references the `__imp_` slot through
+  `__declspec(dllimport)` — verified on x86 objects (`__imp_` +
+  undecorated name relocations).  The sysroot's own CE CRT objects
+  were inspected for comparison: they implement `ExitProcess` as a
+  local wrapper that calls `TerminateProcess` with the current-process
+  pseudo-handle 66 (`SH_CURPROC` 2 + `SYS_HANDLE_BASE` 64 in the CE
+  system-handle space; observed as `mov r0, #66` in the compiled
+  objects).  Akari follows the same CE-native surface: `os_exit`
+  calls `TerminateProcess(AKARI_CURRENT_PROCESS, rc)` and
+  `resolve_w2m` uses `GetProcAddressW`.
+* x86 CE end-to-end: the toolchain sysroot's `libcoredll6-x86.a`
+  contains ARM (armce) import objects (verified — it cannot be used
+  in an x86 link), so the x86 link check was done with an x86 import
+  library generated from the same `coredll6-x86.def` by
+  `llvm-dlltool -m i386 --no-leading-underscore`; Akari objects link
+  cleanly against it (machine I386, subsystem 9, undecorated import
+  table).  Apps compiled against the sysroot's mingwrt headers still
+  reference decorated x86 names (`_GetTickCount`), which that
+  undecorated import library does not satisfy — a sysroot/header
+  concern for x86 CE, outside Akari.
 * `lld-link` rejects versioned `/subsystem:windowsce:5.02` spellings;
   bare `/subsystem:windowsce` stamps version 6.0 (verified).
 * `___main`: i686 `windows-gnu` clang injects a call into `main()`
