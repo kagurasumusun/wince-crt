@@ -428,6 +428,31 @@ for anything Akari's startup layer must do that it does not:
   the program name — the strongest official sources that exist for
   these points.
 
+#### Per-generation official-source coverage
+
+The same records were checked against each CE generation's official
+information source, not just the CE 5.0 archive:
+* **CE 4.x:** the requirements rows used by every CRT record read
+  “Windows CE 1.0/1.01/2.0/2.10/3.0 and later”, all below the CE
+  4.2 target, in the same `(v=msdn.10)` archive that served CE .NET;
+  the CE 3.0-era pages (`ms928607` GetCommandLine, `ms913239`
+  TerminateProcess, `ms915519`/`ms961248` conversion functions)
+  agree with the CE 5.0 pages on every point they share.
+* **CE 5.0:** the archive pages fetched for this audit (above).
+* **CE 6.0:** the surviving `(v=winembedded.60)` set on Microsoft
+  Learn holds Platform Builder material and CE-6.0-specific run-time
+  overview pages (e.g. *Input and Output (Windows Embedded CE 6.0)*
+  `ee479262`, which documents that the CE 6.0 CRT added the
+  security-enhanced `_s` function family — libc scope, not Akari's).
+  No per-function pages for the imported APIs or the entry points
+  were found in that set, and no CE-6.0-specific CRT/entry statement
+  contradicts any record here.  CE 6.0 export-surface deltas (e.g.
+  `GetProcAddressInProcess`) do not affect Akari's imports.
+Zero confirmation gaps remain on the official-documentation side
+within this scope; the only outstanding verification is behavioral
+(the OS-loader boundary on real CE 4/5/6 images, see “Known
+verification gaps”).
+
 ### Verified toolchain behavior (kagurasumusun/llvm-project, branch LLVM-WinCE)
 
 All items below were verified with the toolchain's clang/lld build from
