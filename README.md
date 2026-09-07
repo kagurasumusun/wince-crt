@@ -323,6 +323,43 @@ decisions are grounded in official public information only:
 * ARM/LLVM/Clang/LLD documentation and the observable output of the
   verified toolchain (see below).
 
+### Official-source cross-check (MSDN / MS Learn, Windows CE archives)
+
+Every CRT/startup/link record in this repository was re-checked against
+the official Windows CE documentation as published by Microsoft (the
+CE-era MSDN pages, now served as *Windows Embedded / MSDN archive*
+under learn.microsoft.com; URLs below are the canonical archive IDs).
+Result: **zero contradictions** — every fetched page agrees with the
+records stated above.  Claim → source correspondence:
+
+| Record in this repository | Official source (all fetched in full) |
+|---|---|
+| CRT = `COREDLL.DLL` (via import library `COREDLL.LIB`) + `CORELIBC.LIB` (static CRT startup and performance-critical routines) | *Linking to the CRT (Windows CE 5.0)*, MSDN archive ID `ms859584` — `learn.microsoft.com/en-us/previous-versions/windows/embedded/ms859584(v=msdn.10)`; also *C Run-time Libraries (Windows CE 5.0)* overview, `ms859579` (“The Coredll.lib and Corelibc.lib library files contain the C run-time library functions”) |
+| The five CE entry aliases, exact spellings: `mainACRTStartup`, `mainWCRTStartup`, `WinMainCRTStartup`, `wWinMainCRTStartup`, `_DllMainCRTStartup`; EXE default entry `wWinMainCRTStartup`, else `WinMainCRTStartup`; DLL default `_DllMainCRTStartup`; mainA/mainW require an explicit `/ENTRY` | `ms859584` (same page, “CRT Startup Functions”) |
+| DLL startup sequence: `_DllMainCRTStartup` initializes CRT and DLL, runs constructors of static/nonlocal C++ objects, then calls user `DllMain(PROCESS_ATTACH)`; on process completion, user `DllMain(PROCESS_DETACH)` then the termination list (atexit functions + global/static-object destructors); attach order is the reverse of detach order; thread attach/detach are delivered to the entry but the CRT does no initialization/termination for them; every process gets its own copy of DLL data | *Run-time Library Behavior (Windows CE 5.0)*, `ms859588` |
+| CE `WinMain` is `int WINAPI WinMain(HINSTANCE, HINSTANCE, LPWSTR, int)` with `hPrevInstance` always NULL (use a uniquely named mutex + `ERROR_ALREADY_EXISTS`) and `lpCmdLine` excluding the program name | *WinMain (Windows CE 5.0)*, `ms914104` |
+| CE `DllMain` prototype `BOOL WINAPI DllMain(HANDLE hinstDLL, DWORD dwReason, LPVOID lpvReserved)` (handle, not instance); hinstDLL = module base address = HMODULE; initial thread receives only PROCESS_ATTACH; `LoadLibrary` does not notify already-running threads; unload delivers no per-thread DETACH; FALSE on PROCESS_ATTACH ⇒ `LoadLibrary` returns NULL / process-init failure terminates the process; return value ignored for other reasons; no LoadLibrary/FreeLibrary from the entry | *DllMain (Windows CE 5.0)*, `ms885202` |
+| `/ENTRY` table: `WinMainCRTStartup` → app calling `__cdecl WinMain`; `wWinMainCRTStartup` → app calling `__cdecl wWinMain`; `_DllMainCRTStartup` → DLL calling `__cdecl DllMain`; with neither `/DLL` nor `/SUBSYSTEM`, the linker picks subsystem and entry from whether main or WinMain is defined; parameters/return must match the documented signatures | */ENTRY (Windows CE 5.0)*, `aa449732` |
+| Undecorated, Unicode import model (`coredll.dll` API surface): CE function pages uniformly state “OS Versions: Windows CE 2.0 and later … Link Library: coredll.dll” and that Windows CE supports only the Unicode version of wide APIs | CE run-time function pages (`ms860473` towlower, `ms860377` srand, `ms860374` sprintf, `ms861145` _snprintf, `ms860368` setvbuf, `ms859665` malloc, `ms860384` strcat); *GetCommandLine (Windows CE 3.0)* `ms928607` |
+
+Notes: the CE 5.0 pages above are part of the *Windows CE 5.0
+documentation* (MSDN), served as `(v=msdn.10)` archive pages; the
+per-function “Requirements” blocks are version-uniform (CE 2.0 and
+later, header + `coredll.dll`), which is why one record set covers the
+CE 4.x/5.x/6.0 targets.  Two corroborations from the same archive:
+`ms859579` states that the CE run-time library supports neither ANSI C
+nor POSIX and provides only a Win32-API-compatible subset (no console,
+path/filename file handling, locale, time-setting, or process-spawn
+routines — matching this CRT's coredll-only import surface), and the
+rest of `ms885202` (DllMain restrictions: no `LoadLibrary`/`FreeLibrary`
+from the entry, no synchronization inside `DllMain`, serialized entry
+calls, and safe Win32 calls during detach limited to TLS, object
+creation, and file functions) is guidance to user `DllMain` code that
+the implemented `_DllMainCRTStartup` sequence does not conflict with.
+All claims above were checked in full; no contradiction was found with
+the platform documentation, and no code change resulted from the
+re-check.
+
 ### Verified toolchain behavior (kagurasumusun/llvm-project, branch LLVM-WinCE)
 
 All items below were verified with the toolchain's clang/lld build from
