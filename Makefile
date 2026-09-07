@@ -36,16 +36,21 @@
 #       constructor/destructor runners, and the x86 ___main hook.
 #
 # SCOPE: startup/process glue ONLY, for Windows CE 4.0-6.0 images
-# built with Clang/lld (windows-gnu PE/COFF).  No C library, no C++
-# runtime, no libc replacement is implemented here -- see README for
-# the responsibility table.  All CPU-specific lowering is clang's;
-# PE/COFF layout and subsystem selection are lld's.
+# built with Clang/lld (windows-gnu or llvm-wince PE/COFF).  No C
+# library, no C++ runtime, no libc replacement is implemented here --
+# see README for the responsibility table.  All CPU-specific lowering
+# is clang's; PE/COFF layout and subsystem selection are lld's.
 #
-# Cross-build usage:
-#   make TARGET=armv7-unknown-windows-gnu            # ARMv7 (CE 6 class)
-#   make TARGET=armv7-unknown-windows-gnu ARCHFLAGS=-mthumb   # Thumb2
-#   make TARGET=armv5-unknown-windows-gnu            # ARMv5 (CE 5 class)
-#   make TARGET=i686-unknown-windows-gnu             # x86 (CEPC etc.)
+# Cross-build usage (verified with the kagurasumusun/llvm-project
+# WinCE driver, branch LLVM-WinCE -- the *-pc-wince triple):
+#   make                                        # arm-pc-wince (default: ARMv5TE, armel ABI, CE 6.0)
+#   make TARGET=arm-pc-wince                    # same, explicitly
+#   make TARGET=arm-pc-wince5.0                 # CE 5.0 deployment (_WIN32_WCE=0x500)
+#   make TARGET=arm-pc-wince4.2                 # CE 4.2 deployment (_WIN32_WCE=0x420)
+#   make TARGET=i386-pc-wince                   # x86 CE
+#   make TARGET=armv7-unknown-windows-gnu ARCHFLAGS=-mthumb  # ARMv7 Thumb-2 (windows-gnu)
+#   make TARGET=armv7-unknown-windows-gnu       # ARMv7 ARM state (windows-gnu)
+#   make TARGET=i686-unknown-windows-gnu        # x86 (windows-gnu)
 #   make TARGET=<triple> CC=/path/to/clang AR=/path/to/llvm-ar
 #
 # Host-side checks (no cross toolchain needed):
@@ -53,7 +58,7 @@
 #   make hosttest    # build and RUN the host parser self-test
 #   make check       # hostcheck + hosttest
 
-TARGET        ?= armv7-unknown-windows-gnu
+TARGET        ?= arm-pc-wince
 CC            ?= clang
 AR            ?= llvm-ar
 ARCHFLAGS     ?=
@@ -62,15 +67,27 @@ PREFIX        ?= /usr/local
 INCLUDES      = -Iinclude
 
 # Target flags.
-#   -D_AKARI_BUILD=1, -D_WIN32_WCE=0x0500 : Akari sources are CE-only
-#       and must never see desktop-Win32 preprocessor behavior.
+#   -D_AKARI_BUILD=1 : marks the CRT's own translation units.
+#   -D_WIN32_WCE=... : the headers only test the macro's existence
+#       (it selects the CE calling conventions); the value is unused.
+#       The WinCE clang driver of kagurasumusun/llvm-project
+#       (triple *-pc-wince, any version) predefines _WIN32_WCE and
+#       UNDER_CE itself, and re-defining the macro from the command
+#       line would warn.  Plain *-windows-gnu triples have no CE
+#       driver, so the build supplies the macro there.
 #   -fno-builtin       : we are the layer below any hosted runtime.
 #   -nostdlibinc       : no host/desktop libc headers.
 #   -fno-stack-protector: no __stack_chk_guard exists yet at entry.
-#   (NO -ffreestanding: Clang 22.x ARM windows-gnu emits invalid .seh
-#   sequences for -ffreestanding code at -Os; verified toolchain
+#   (NO -ffreestanding: the ARM windows-gnu backend emits invalid
+#   .seh sequences for -ffreestanding code at -Os; verified toolchain
 #   behavior, see README.)
-TARGET_FLAGS  = -D_AKARI_BUILD=1 -D_WIN32_WCE=0x0500 \
+ifneq (,$(findstring wince,$(TARGET)))
+CE_DEFINES =
+else
+CE_DEFINES = -D_WIN32_WCE=0x0500
+endif
+
+TARGET_FLAGS  = -D_AKARI_BUILD=1 $(CE_DEFINES) \
                 -fno-builtin -nostdlibinc -fno-stack-protector
 
 CFLAGS        = -Os -ffunction-sections -fdata-sections \

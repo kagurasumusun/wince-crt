@@ -48,13 +48,13 @@ void akari_init_args(void);
 /* Run global initializers in Akari's documented order:
  *   .CRT$XI* (C) and .CRT$XC* (C++) first-to-last (Microsoft
  *   documents the alphabetical merging of the .CRT$X* family; lld
- *   reproduces it, verified), then the lld __CTOR_LIST__ walked
- *   backward (per-object source order; objects in reverse link
+ *   reproduces it, verified), then __CTOR_LIST__ walked backward
+ *   (per-object blocks from their end, objects in reverse link
  *   order -- see runtime.c layout notes). */
 void akari_run_ctors(void);
 
-/* Run global destructors from the lld __DTOR_LIST__.  Words are
- * stored per object in reverse source order and objects are
+/* Run global destructors from __DTOR_LIST__.  The .dtors words are
+ * stored symmetrically to the .ctors words and objects are
  * concatenated in link order, so walking the list forward runs
  * destructors in the exact reverse of the constructor order
  * (last-constructed first), both inside one object and across

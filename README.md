@@ -2,17 +2,36 @@
 
 Akari is a small, architecture-neutral PE/COFF **startup layer** for
 programs built with **Clang/lld** targeting **Windows CE 4.x, 5.x and 6.x**
-(ARM, x86, MIPS, SuperH).  It gets an image from the PE entry point to the
-user's `main` / `wmain` / `WinMain` / `wWinMain` / `DllMain`: it parses the
-command line, runs global constructors, and hands shutdown to the C
-library.
+on 32-bit ARM (ARM/Thumb state, including the `armel` ABI used by the
+WinCE toolchain), x86, MIPS and SuperH.  It gets an image from the PE
+entry point to the user's `main` / `wmain` / `WinMain` / `wWinMain` /
+`DllMain`: it parses the command line, runs global constructors, and
+hands shutdown to the C library.
 
 Akari is **not** a C library, **not** a C++ runtime, **not**
 compiler-rt, and **not** an SDK or linker script.  No libc, libstdc++,
 libc++ or STL code lives here; those responsibilities stay with the
 components the consumer links (see the table below).  Akari deliberately
 covers only the startup/process-glue role of the CRT runtime that
-accompanies `*-windows-gnu` Clang toolchains on these targets.
+accompanies Clang/lld on these targets.
+
+## Toolchain
+
+Akari is built and link-verified with the Windows CE toolchain of
+[kagurasumusun/llvm-project](https://github.com/kagurasumusun/llvm-project)
+(branch `LLVM-WinCE`): clang/lld with a WinCE driver, COFF/CE support in
+lld, and the `*-pc-wince` target triple (`arm-pc-wince` and
+`i386-pc-wince`, optionally versioned as `arm-pc-wince5.0` /
+`arm-pc-wince4.2` / ...).  In that toolchain the ARM target defaults to
+the **`armel` ABI**: ARMv5TE (`arm926ej-s`), little-endian, AAPCS
+soft-float (`-mfloat-abi=soft`); clang predefines `_WIN32_WCE`,
+`UNDER_CE`, `__ARMEL__`, `__ARM_PCS` etc. for it.  CE deployment
+versions select the coredll import surface and the `_WIN32_WCE` value.
+
+Plain `*-windows-gnu` triples (`armv7-unknown-windows-gnu`,
+`i686-unknown-windows-gnu`, Thumb-2 with `-mthumb`) remain supported
+and verified targets of the same sources, for toolchains without the
+WinCE driver.
 
 ## Responsibility table
 
@@ -20,13 +39,13 @@ accompanies `*-windows-gnu` Clang toolchains on these targets.
 |---|---|---|
 | EXE entry points `WinMainCRTStartup`, `wWinMainCRTStartup`, `mainACRTStartup`, `mainWCRTStartup` (the four names Windows CE documents; there is **no** `mainCRTStartup` on CE — see below) | **Akari** (`akari_crt0.o`) | ✅ |
 | x86-only aliases `_WinMainCRTStartup`, `_wWinMainCRTStartup`, `_mainACRTStartup`, `_mainWCRTStartup` (the leading-underscore spellings an x86 C compiler gives these C names) | **Akari** | ✅ |
-| DLL entry points `_DllMainCRTStartup` (canonical CE spelling) and `DllMainCRTStartup` (lld's default DLL-entry search name) | **Akari** (`akari_dllcrt.o`) | ✅ |
+| DLL entry points `_DllMainCRTStartup` (canonical CE spelling) and `DllMainCRTStartup` (the WinCE driver's `/entry:DllMainCRTStartup`) | **Akari** (`akari_dllcrt.o`) | ✅ |
 | Command-line parse into `__argc`/`__argv`/`__wargv`, `_wcmdtail` for `WinMain`'s `lpCmdLine`, per the documented MS parsing rules | **Akari** (clean-room parser; imports `GetCommandLineW`) | ✅ |
 | Narrow `__argv`/`_acmdln`: `WideCharToMultiByte(CP_ACP)` resolved at runtime, lossy 7-bit fallback when the converter is absent from the OS image | **Akari** | ✅ |
 | MSVCRT-model data globals `__argc __argv __wargv _acmdln _wcmdln _wcmdtail _fmode _doserrno _commode __dso_handle` (coredll exports no data objects) | **Akari** (`libakari.a`) | ✅ |
-| C constructors: `.CRT$XI*` / `.CRT$XC*` (clang-cl-style objects) first-to-last, then lld's `.ctors` list; C destructors from lld's `.dtors` list | **Akari** | ✅ |
+| C/C++ initializers: `.CRT$XI*` / `.CRT$XC*` (clang-cl objects) first-to-last, then the `.ctors` list (`__CTOR_LIST__`); destructors from the `.dtors` list | **Akari** | ✅ |
 | Weak user-entry fallbacks (`DllMain` default in the DLL object; missing `main`/`WinMain` detected at runtime) | **Akari** | ✅ |
-| x86 `___main` hook (i686 Clang makes `main()` call it; here it is a no-op because entry points already ran constructors) | **Akari** | ✅ |
+| x86 `___main` hook (only i686 `windows-gnu` clang makes `main()` call it; here it is a no-op because entry points already ran constructors) | **Akari** | ✅ |
 | Process exit: call the C library's `exit()` when one is linked (atexit/`__cxa_finalize`/stdio flush happen there); direct `ExitProcess` only as a no-libc fallback | **Akari** (just the call) | ✅ |
 | C library (`malloc`/`printf`/`exit`/`atexit`/`abort`/`memcpy`/`setjmp`/errno/...) | **libc** (coredll msvcrt exports, newlib, llvm-libc...) | ❌ |
 | `__stack_chk_guard`/`__stack_chk_fail`, `__chkstk`, `__aeabi_*` builtins | **libc / compiler-rt** (clang links compiler-rt automatically) | ❌ |
@@ -40,18 +59,23 @@ accompanies `*-windows-gnu` Clang toolchains on these targets.
 
 All sources are C99, use no inline assembly, no endianness or pointer-width
 assumptions, and no ISA-specific calling-convention decorations; clang does
-the lowering.  `WINAPI` (in `include/akari/compiler.h`) is empty on
+the lowering.  The same objects serve the `armel` (soft-float AAPCS) and
+hard-float/other-ABI ARM targets, x86, and any other CE target clang can
+lower: only clang's target code generation and lld's COFF handling differ
+between them.  `WINAPI` (in `include/akari/compiler.h`) is empty on
 Windows CE (Microsoft documents CE entry functions as `__cdecl`; on ARM
 `__cdecl`/`__stdcall` coincide, and on x86 CE the CRT entry names carry
 no `@n` decoration), and expands to `__stdcall` only for desktop 32-bit
 x86 builds of the same headers.
 
-| Architecture | CE versions | status |
-|---|---|---|
-| ARM v4–v7 (ARM or Thumb state, incl. Thumb-2) | 4.x–6.x | built & link-verified (this toolchain) |
-| x86 (i486+, CEPC / emulator) | 4.x–6.x | built & link-verified (this toolchain) |
-| MIPS (MIPSII/IV) | 4.x–6.x | source-ready; not yet built (toolchain lacks the target in the verified snapshot) |
-| SuperH (SH3/SH4) | 4.x–6.x | source-ready; not yet built (toolchain lacks the target in the verified snapshot) |
+| Architecture / ABI | Triple (this toolchain) | CE versions | status |
+|---|---|---|---|
+| ARMv5TE **armel** (little-endian, soft-float AAPCS; the WinCE default) | `arm-pc-wince`, `arm-pc-wince5.0`, `arm-pc-wince4.2`, ... | 4.x–6.x | built & link-verified (EXE + DLL) |
+| x86 (CEPC / emulator) | `i386-pc-wince` | 4.x–6.x (coredll surface per version) | built & link-verified |
+| ARMv7 (ARM/Thumb-2) | `armv7-unknown-windows-gnu` (`-mthumb`) | 5.x–6.x class | built & link-verified (windows-gnu) |
+| x86 | `i686-unknown-windows-gnu` | 4.x–6.x | built & link-verified (windows-gnu) |
+| MIPS (MIPSII/IV) | — | 4.x–6.x | source-ready; not buildable with this toolchain (no such target) |
+| SuperH (SH3/SH4) | — | 4.x–6.x | source-ready; not buildable with this toolchain (no such target) |
 
 ## Build products and how to link them
 
@@ -73,41 +97,59 @@ archive, linked by both EXEs and DLLs.
 ### Building
 
 ```sh
-make                                # TARGET defaults to armv7-unknown-windows-gnu
-make TARGET=i686-unknown-windows-gnu
-make TARGET=armv7-unknown-windows-gnu ARCHFLAGS=-mthumb   # Thumb-2
+make                                # TARGET defaults to arm-pc-wince (armel, CE 6.0)
+make TARGET=arm-pc-wince5.0         # CE 5.0 deployment (driver defines _WIN32_WCE=0x500)
+make TARGET=i386-pc-wince           # x86 CE
+make TARGET=armv7-unknown-windows-gnu ARCHFLAGS=-mthumb   # Thumb-2 (windows-gnu)
 make CC=/path/to/clang AR=/path/to/llvm-ar                # non-PATH tools
 ```
 
-### Linking an EXE (verified end-to-end, development toolchain)
+### Linking an EXE (verified end-to-end)
+
+The WinCE clang driver always prepends its own start file (`crt3.o`)
+and the CeGCC-lineage archives (`libmingw32.a`, `libcoredll*.a`, ...)
+and ignores `-nostdlib`/`-nostartfiles` (verified), so a link that uses
+Akari drives `lld-link` directly, with `-wince` (CE image defaults):
 
 ```sh
-clang --target=armv7-unknown-windows-gnu -fuse-ld=lld -nostdlib \
-      -Wl,--subsystem=windowsce:5.02 -Wl,--entry=mainACRTStartup \
-      your_code.o akari_crt0.o -L. -lakari -L<sdk>/lib -lcoredll \
-      -o your.exe
+lld-link -wince /subsystem:windowsce /entry:WinMainCRTStartup \
+    /base:0x10000 /fixed \
+    your_code.o akari_crt0.o libakari.a <sysroot>/lib/libcoredll6.a \
+    -o your.exe
 ```
-
-(The example uses the development toolchain, whose lld accepts the
-`windowsce` subsystem; see the note in "Verified toolchain behavior".)
 
 * Choose the entry by what the app defines: `mainACRTStartup` for
   `main()`, `mainWCRTStartup` for `wmain()`, `WinMainCRTStartup` /
   `wWinMainCRTStartup` for `WinMain` / `wWinMain`.  Any of the four works
   regardless of the user function (each falls through to the others),
-  but the documented convention pairs them as above.
+  but the documented convention pairs them as above.  The toolchain's
+  own default entry is `WinMainCRTStartup` (EXE) and
+  `DllMainCRTStartup` (DLL), both of which Akari provides.
 * There is deliberately **no** `mainCRTStartup`: Microsoft's CE
   documentation ("Linking to the CRT", "/ENTRY", Windows CE 5.0) assigns
   `main()` programs to `mainACRTStartup`.
-* A DLL links `akari_dllcrt.o` instead and can omit `--entry` — lld's
-  default DLL-entry search finds `DllMainCRTStartup`.
+* The coredll import library is the version- and architecture-selected
+  sysroot archive: CE 6.0 `libcoredll6.a` (x86: `libcoredll6-x86.a`),
+  CE 5.0 `libcoredll.a`, CE 4.x `libcoredll4.a` (toolchain driver
+  behavior; an SDK's own `coredll.lib` works the same way).  The
+  toolchain's `wince-sysroot` is assembled by
+  `kagurasumusun/cellvm-build`'s `build-wince-sysroot.sh`.
+* The compiler-rt builtins archive (`libclang_rt.builtins-*.a`) and, for
+  C++, libc++/libc++abi/libunwind remain the compiler's/libraries'
+  responsibility (see the table above).
+* `-auto-import` is **not** needed: Akari imports coredll functions with
+  explicit `__declspec(dllimport)`, so no pseudo-relocation table is
+  emitted and no `_pei386_runtime_relocator` is required.  (Legacy
+  CeGCC objects that reference DLL data without dllimport would need
+  the mingwrt-style runtime support instead — outside Akari's scope.)
 * If you do not link a C library, `exit` is unresolved-weak and the
-  entry falls back to `ExitProcess` directly.
+  entry falls back to `ExitProcess` directly (weak externs resolve to
+  zero in lld-link; verified).
 
-Subsystem: pass `--subsystem=windowsce:<ver>` (verified: 5.02 → header
-`IMAGE_SUBSYSTEM_WINDOWS_CE_GUI`, major 5, minor 2).  The version is
-recorded in the PE optional header; choose the value your target OS
-generation expects (5.02 for CE 5.02, 6.00 for CE 6.x, ...).
+Subsystem: `lld-link -wince` accepts `/subsystem:windowsce` and stamps
+subsystem 9 (`IMAGE_SUBSYSTEM_WINDOWS_CE_GUI`) with OS version 6.0 in
+the PE optional header (verified).  Versioned spellings
+(`/subsystem:windowsce:5.02`) are rejected by lld-link (verified).
 
 ## Host-side checks (no cross toolchain needed)
 
@@ -133,8 +175,8 @@ include/akari/compiler.h   GNU/Clang attribute macros, AKARI_ENTRY asm-label
 include/akari/crt.h        PUBLIC data-global declarations (MSVCRT model).
 include/akari/internal.h   PRIVATE shared declarations (not installed).
 src/crt/runtime.c          Data globals, command-line parser + narrow-argv
-                           synthesis, .CRT$X* bookends, GNU-list runners,
-                           weak ___main hook, coredll import declarations.
+                           synthesis, .CRT$X* bookends, .ctors/.dtors list
+                           runners, weak ___main hook, coredll imports.
 src/crt/crt0.c             EXE entries + x86 underscore aliases; weak user
                            main/WinMain detection; dtors + exit hand-off.
 src/crt/dllcrt.c           _DllMainCRTStartup + DllMainCRTStartup alias,
@@ -189,44 +231,54 @@ used instead, and both paths are exercised by the host self-test.
 
 ### Constructor/destructor lists (verified layout)
 
-Clang for `*-windows-gnu` emits `.ctors`/`.dtors` COFF sections and lld
-concatenates the per-object contents in link order, bracketed by a `-1`
-header and a `0` terminator, defining `__CTOR_LIST__`/`__DTOR_LIST__`.
-Verified with `llvm-readobj`/`llvm-objdump` on i686 and ARMNT images
-(one and two objects, one and several entries per object): per-object
-words are stored in **reverse source order**.  Windows CE documentation
-does not specify static-initializer order across objects, so Akari's
-documented choice is: walk `__CTOR_LIST__` **backward** (per-object
-source order; objects in reverse link order) and `__DTOR_LIST__`
-**forward**.  Destruction is then the exact mirror of construction —
-last-constructed runs first, both inside one object and across objects —
-and needs no runtime bookkeeping.  lld points the list symbol at the
-`-1` header (verified on i686 and ARMNT images, with both strong and
-weak references); the walker additionally tolerates a list that starts
-directly with a real entry, skipping the `-1` only when it is present
-at `l[0]`.
+Clang emits `.ctors`/`.dtors` COFF sections for `__attribute__((constructor))`
+/ `__attribute__((destructor))` on every CE-capable target of the
+verified toolchain (`armv7-unknown-windows-gnu`, `i686-unknown-windows-gnu`,
+`arm-pc-wince`, `i386-pc-wince`).  The linker concatenates the per-object
+contents in link order, bracketed by a `-1` header and a `0` terminator,
+and defines `__CTOR_LIST__`/`__DTOR_LIST__` pointing at the `-1` header.
+Verified with `llvm-readobj`/`llvm-objdump` on linked images from both
+linkers of the toolchain — ld.lld (windows-gnu, i686 and ARMNT objects)
+and lld-link in `-wince` mode (armel and x86 CE objects), one and two
+objects, one and several entries per object, with strong and weak
+references.  Per-object word order is target-dependent (verified on
+objects): `*-windows-gnu` Clang stores `.ctors`/`.dtors` words in
+**reverse source order**, while the WinCE driver's `*-pc-wince` targets
+store them in **source order**.  Windows CE documentation does not
+specify static-initializer order across objects, so Akari's documented
+choice is: walk `__CTOR_LIST__` **backward** and `__DTOR_LIST__`
+**forward**.  Because the `.dtors` blocks are stored symmetrically to
+the `.ctors` blocks, destruction is then the exact mirror of
+construction in both storage orders — last-constructed entries run
+first, both inside one object and across objects — and no runtime
+bookkeeping is needed.  The walkers tolerate a list that starts
+directly with a real entry, skipping the `-1` only when it is actually
+present at `l[0]`.
 
-Objects compiled in MS style (clang-cl, `-fms-compatibility`) place
-initializer pointers in `.CRT$XI*`/`.CRT$XC*` sections instead.
-Microsoft documents that its linker combines these subsections in the
-order of the part after `$` ("CRT initialization", Microsoft Learn), so
-user entries in `.CRT$XCU`/`.CRT$XIU` always land between the
-`.CRT$XCA`/`.CRT$XCZ` and `.CRT$XIA`/`.CRT$XIZ` pairs.  Akari ships those
-four NULL sentinels in `runtime.c` and walks the ranges first-to-last.
-lld reproduces the ordering — verified here on linked ARMNT images with
-the user object placed both before and after the CRT object: the
-sentinel/entry offsets are identical in both images and no other data
-falls inside the walked ranges.  Mechanisms are no-ops when their
-tables are empty, so mixed-style links stay well-defined.
+Objects compiled in MS style (clang-cl) place initializer pointers in
+`.CRT$XI*`/`.CRT$XC*` sections instead.  Microsoft documents that its
+linker combines these subsections in the order of the part after `$`
+("CRT initialization", Microsoft Learn), so user entries in
+`.CRT$XCU`/`.CRT$XIU` always land between the `.CRT$XCA`/`.CRT$XCZ`
+and `.CRT$XIA`/`.CRT$XIZ` pairs.  Akari ships those four NULL sentinels
+in `runtime.c` and walks the ranges first-to-last.  lld-link in `-wince`
+mode merges the family into one `.CRT` section sorted by subsection
+name — verified on linked armel images containing wince-crt objects and
+clang-cl objects: the layout is exactly `XCA(NULL) XCU(entry)
+XCZ(NULL) XIA(NULL) XIZ(NULL) [XTU...]` and no other data falls inside
+the walked ranges.  (The same ordering was verified for ld.lld on
+windows-gnu images.)  Mechanisms are no-ops when their tables are
+empty, so mixed-style links stay well-defined.
 
 ### Stack protection, builtins, C++
 
 Akari compiles its own TUs with `-fno-stack-protector` (no guard exists
 before the C library initializes it) and `-fno-builtin` +
 `-nostdlibinc` (it is the layer below any hosted runtime).  Note: do
-**not** add `-ffreestanding` — Clang 22.x ARM `windows-gnu` emits
-invalid `.seh` sequences for `-ffreestanding` code at `-Os` (verified;
-see below).  `__cxa_atexit`/`__cxa_finalize` and static-destructor
+**not** add `-ffreestanding` — the ARM `windows-gnu` backend of the
+verified toolchain emits invalid `.seh` directives for
+`-ffreestanding` code at `-Os` (verified); the `*-pc-wince` target is
+not affected.  `__cxa_atexit`/`__cxa_finalize` and static-destructor
 finalization belong to libc++abi/libc; Akari's destructor runner only
 covers the `.dtors` list Clang emits for GNU-style C `__attribute__((destructor))`
 and (with libc++abi) never double-runs `__cxa_finalize`.
@@ -254,44 +306,70 @@ decisions are grounded in official public information only:
   (CE), `CommandLineToArgvW`/parsing rules, `WideCharToMultiByte`,
   `LocalAlloc`/`LocalFree`;
 * ARM/LLVM/Clang/LLD documentation and the observable output of the
-  official toolchain (see below).
+  verified toolchain (see below).
 
-### Verified toolchain behavior (clang/LLD 22.1.8 snapshot)
+### Verified toolchain behavior (kagurasumusun/llvm-project, branch LLVM-WinCE)
+
+All items below were verified with the toolchain's clang/lld build from
+CI run `34078339236` (head `29d8b882ab`, clang 22.1.8 with the WinCE
+driver and COFF/CE lld support).
 
 * All TUs compile warning-free at `-Wall -Wextra -Wshadow
-  -Wstrict-prototypes -Wmissing-prototypes` for `armv7-unknown-windows-gnu`
+  -Wstrict-prototypes -Wmissing-prototypes` for `arm-pc-wince`
+  (armel: ARMv5TE, soft-float AAPCS — `__ARMEL__`, `__ARM_PCS`,
+  `__ARM_EABI__` predefined), `arm-pc-wince5.0`/`4.2` (driver defines
+  `_WIN32_WCE` 0x500/0x420 with no warning when the CRT build omits its
+  own `-D`), `i386-pc-wince`, and for `armv7-unknown-windows-gnu`
   (ARM and `-mthumb` Thumb-2) and `i686-unknown-windows-gnu`.
-* End-to-end links (clang driver and direct `ld.lld`; development
-  toolchain, clang/LLD 22.1.8-based with Windows CE subsystem support):
-  * EXE: `crt0.o + runtime.o + coredll import lib` →
-    `IMAGE_FILE_MACHINE_ARMNT`/`I386`, subsystem `WINDOWS_CE_GUI` (9),
-    5.02; imports exactly `ExitProcess` + `GetCommandLineW`,
-    `GetModuleFileNameW`, `GetModuleHandleW`, `GetProcAddress`,
-    `LocalAlloc`, `LocalFree` — no desktop-API imports.
-  * DLL: `dllcrt.o + runtime.o` links with the default entry search
-    (`DllMainCRTStartup`), no `ExitProcess` import.
-* Entry resolution, `___main` injection on i686, and the list layouts
-  described above were confirmed with `llvm-readobj` on the linked
-  images.
-* `.CRT$X*` family ordering (see above) verified on linked ARMNT images
-  in both object orders.
+* Objects: machine `IMAGE_FILE_MACHINE_ARM` (0x1C0) for `arm-pc-wince`,
+  `IMAGE_FILE_MACHINE_I386` for `i386-pc-wince`; entry symbols
+  `WinMainCRTStartup`/`wWinMainCRTStartup`/`mainACRTStartup`/
+  `mainWCRTStartup` plus, on x86 only, their leading-underscore
+  aliases; `.CRT$XIA/XIZ/XCA/XCZ` sentinel sections present.
+* End-to-end links with direct `lld-link -wince` (the driver's own
+  link mode; it always prepends its CeGCC start files and ignores
+  `-nostdlib`, so Akari links bypass it):
+  * EXE (`crt0.o + runtime.o + user + link stubs`): machine ARM/I386,
+    subsystem `WINDOWS_CE_GUI` (9), OS version 6.0, entry resolved to
+    the requested CE entry; `.ctors` = `[-1, entries..., 0]`, `.CRT` =
+    the four NULL sentinels (plus sorted user entries when a clang-cl
+    object is present); no desktop-API imports beyond the coredll set.
+  * DLL (`dllcrt.o + runtime.o`, `/dll /entry:DllMainCRTStartup`):
+    links; subsystem 9.
+* `lld-link` rejects versioned `/subsystem:windowsce:5.02` spellings;
+  bare `/subsystem:windowsce` stamps version 6.0 (verified).
+* `___main`: i686 `windows-gnu` clang injects a call into `main()`
+  (so Akari keeps its no-op `___main`); `i386-pc-wince` does not
+  (verified on objects).
+* clang-cl objects for `arm-pc-wince` put initializer pointers in
+  `.CRT$XCU`/`.CRT$XTU` (use `/Zl` to drop the `.drectve` default-lib
+  lines); lld-link merges them into the sorted `.CRT` layout above
+  (verified).
+* `.CRT$X*`/list layouts were verified in both object orders (user
+  object before and after the CRT objects) with identical offsets.
+* Per-object `.ctors`/`.dtors` storage order differs between the two
+  target families of the same clang: `*-windows-gnu` stores words in
+  reverse source order, `*-pc-wince` in source order (verified on
+  objects with several entries); the backward-ctor/forward-dtor
+  runners preserve the LIFO mirror under both (see "Constructor/
+  destructor lists").
 * The host self-test (`make hosttest`) runs the parser against the
   documented rules on the host.
-* Note: the official upstream LLVM 22.1.8 release binaries accept no
-  Windows CE subsystem value in either `ld.lld` or `lld-link` (both
-  reject `windowsce`; tested) and their `llvm-dlltool` lacks an ARM
-  target.  Producing `subsystem 9` images and ARM import libraries
-  therefore requires a CE-capable lld/dlltool build (e.g. the
-  development toolchain above, or the CE SDK's own linker) — a linker
-  concern outside Akari's scope.
 
 ## Known verification gaps
 
-* MIPS/SH: not yet built in this snapshot (no such target in the
-  downloaded LLVM build); the sources contain no ISA-specific code.
+* MIPS/SH: the WinCE clang driver accepts only arm/thumb/x86 triples
+  (it rejects every other architecture with an explicit diagnostic,
+  and LLVM has no SuperH backend); the sources contain no ISA-specific
+  code and remain ready for a toolchain that can target MIPS/SH CE.
 * No Windows CE device/emulator runtime was available: entry-point
   execution is verified to the OS loader boundary (headers, entry
   symbols, imports, list layouts), not by running images on CE 4/5/6.
+* `lld-link -wince` stamps subsystem OS version 6.0 unconditionally
+  (versioned `/subsystem:windowsce:` spellings are rejected); whether
+  CE 4/5 loaders accept a 6.0 stamp is not verified on hardware — if a
+  CE 4/5 device rejects it, the fix belongs in the linker's CE support
+  (a header patch is outside Akari's scope).
 * Per-CE-version (4.x/5.x/6.x) export coverage of the imported APIs
   against official SDK documentation is a pending audit; images that
   cut optional modules are handled defensively at runtime (see the

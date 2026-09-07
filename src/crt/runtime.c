@@ -23,40 +23,47 @@
  *    (Windows CE 5.0)", CommandLineToArgvW, GetCommandLine(W),
  *    WideCharToMultiByte, LocalAlloc/LocalFree, and the PE/COFF
  *    format specification.
- *  - Observed behavior of the LLVM/Clang/lld toolchain this CRT is
- *    built for (details and reproduction commands in README,
- *    "Verified toolchain behavior"): lld synthesises __CTOR_LIST__ /
- *    __DTOR_LIST__ arrays from the .ctors/.dtors sections Clang emits
- *    for windows-gnu targets, and it orders the .CRT$X* family the
- *    way Microsoft documents for its own linker ("CRT initialization",
- *    Microsoft Learn): subsections are combined in the order of the
- *    part after '$', so user entries (.CRT$XCU/.CRT$XIU) always land
- *    between the NULL sentinels below (.CRT$XCA/.CRT$XCZ and
- *    .CRT$XIA/.CRT$XIZ).  The lld ordering was verified on linked
- *    ARMNT images with the user object placed both before and after
- *    the CRT object: the sentinel and entry offsets are identical in
- *    the two images and no other data falls inside the walked ranges.
- *  - Observed lld list layout (verified on i686 and ARMNT images, one
- *    and two contributing translation units, and with both strong and
- *    weak references): each .ctors/.dtors list is the concatenation
- *    of the per-object section contents in link order, bracketed by
- *    a -1 header and a 0 terminator, and lld points
- *    __CTOR_LIST__/__DTOR_LIST__ at the -1 header.  The walkers below
- *    nevertheless skip a leading -1 only when it is actually present
- *    at l[0], so they also handle a list that starts with a real
- *    entry.
- *  - Per-object .ctors/.dtors words are stored in reverse source
- *    order (verified with several declarations per object on i686 and
- *    ARMNT): last-declared entry first.  With link-order
- *    concatenation the
- *    backward walk over __CTOR_LIST__ therefore runs each object's
- *    constructors in source order and the objects in reverse link
- *    order, and the forward walk over __DTOR_LIST__ runs destructors
- *    in the exact reverse of that constructor order.  Windows CE
- *    documentation does not specify initializer order across
- *    objects; per-object source order with objects in reverse link
- *    order and destructors as the exact LIFO mirror is Akari's
- *    documented design decision (it needs no runtime bookkeeping).
+ *  - Observed behavior of the verified toolchain (kagurasumusun/
+ *    llvm-project, branch LLVM-WinCE; details and reproduction
+ *    commands in README, "Verified toolchain behavior"): both of the
+ *    toolchain's linkers -- ld.lld for *-windows-gnu objects and
+ *    lld-link in its -wince mode for arm-pc-wince / i386-pc-wince
+ *    objects -- synthesise __CTOR_LIST__ / __DTOR_LIST__ arrays from
+ *    the .ctors/.dtors sections Clang emits, and order the .CRT$X*
+ *    family the way Microsoft documents for its own linker ("CRT
+ *    initialization", Microsoft Learn): subsections are combined in
+ *    the order of the part after '$', so user entries (.CRT$XCU /
+ *    .CRT$XIU) always land between the NULL sentinels below
+ *    (.CRT$XCA/.CRT$XCZ and .CRT$XIA/.CRT$XIZ).  The ordering was
+ *    verified on linked images with the user object placed both
+ *    before and after the CRT object: the sentinel and entry offsets
+ *    are identical in the two orders and no other data falls inside
+ *    the walked ranges.
+ *  - Observed list layout (verified on i686/ARMNT windows-gnu and on
+ *    armel/x86 lld-link -wince images, one and two contributing
+ *    translation units, strong and weak references): each
+ *    .ctors/.dtors list is the concatenation of the per-object
+ *    section contents in link order, bracketed by a -1 header and a 0
+ *    terminator, and the list symbols point at the -1 header.  The
+ *    walkers below nevertheless skip a leading -1 only when it is
+ *    actually present at l[0], so they also handle a list that starts
+ *    with a real entry.
+ *  - Per-object .ctors/.dtors words are stored by Clang in a target-
+ *    dependent order (verified with several declarations per object):
+ *    *-windows-gnu targets store them in REVERSE source order
+ *    (last-declared first), while the WinCE driver's *-pc-wince
+ *    targets store them in source order.  The linkers concatenate the
+ *    per-object blocks in link order in both cases.  The backward
+ *    walk over __CTOR_LIST__ therefore runs each object's entries
+ *    from the end of its block (source order on windows-gnu, reverse
+ *    source order on *-pc-wince) and the objects in reverse link
+ *    order; the forward walk over __DTOR_LIST__ runs destructors in
+ *    the exact reverse of the constructor order in both cases,
+ *    because the .dtors blocks are stored symmetrically to the .ctors
+ *    blocks.  Windows CE documentation does not specify initializer
+ *    order across objects; the backward-ctor/forward-dtor scheme with
+ *    destructors as the exact LIFO mirror is Akari's documented
+ *    design decision (it needs no runtime bookkeeping).
  *
  * This file makes no libc calls: it uses only the coredll imports
  * listed below (C library features such as malloc/atexit belong to
@@ -552,8 +559,8 @@ void akari_run_ctors(void)
      * are walked first-to-last: Microsoft documents alphabetical
      * merging of the .CRT$X* family and lld reproduces it (verified;
      * see the notes at the top of this file).  The .ctors list is
-     * walked backward per the layout notes above: entries of one
-     * object run in source order, objects run in reverse link
+     * walked backward per the layout notes above: entries run from
+     * the end of each per-object block, objects in reverse link
      * order. */
     init_fn *p;
 
@@ -588,12 +595,12 @@ void akari_run_ctors(void)
 
 void akari_run_dtors(void)
 {
-    /* Per-object .dtors words are stored in reverse declaration order
-     * by the compiler (verified: destructors declared da then db
-     * appear as [db, da]) and objects are concatenated in link order,
-     * so running the list forward yields the exact LIFO mirror of
-     * akari_run_ctors: last-constructed entries are destroyed first
-     * (see the layout notes at the top of this file). */
+    /* .dtors words are stored symmetrically to the .ctors words
+     * (target-dependent per-object order; verified) and objects are
+     * concatenated in link order, so running the list forward yields
+     * the exact LIFO mirror of akari_run_ctors: last-constructed
+     * entries are destroyed first (see the layout notes at the top
+     * of this file). */
     if (__DTOR_LIST__) {
         init_fn *l = __DTOR_LIST__;
         size_t n = 0;
