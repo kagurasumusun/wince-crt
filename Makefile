@@ -7,10 +7,11 @@
 #   build/akari_crt0.o   (from src/crt/crt0.c)
 #       EXE startup object.  Contains the Windows CE EXE entry points
 #       WinMainCRTStartup, wWinMainCRTStartup, mainACRTStartup and
-#       mainWCRTStartup, plus the underscore-prefixed aliases used by
-#       the older CE x86 tools.  The linker selects the entry point
-#       with --entry=<name> (or /ENTRY:<name>); unreferenced entries
-#       are dropped by --gc-sections, so they cost nothing at runtime.
+#       mainWCRTStartup, plus the underscore-prefixed aliases (the
+#       spellings an x86 C compiler gives those C names).  The linker
+#       selects the entry point with --entry=<name> (or /ENTRY:<name>);
+#       unreferenced entries are dropped by --gc-sections, so they cost
+#       nothing at runtime.
 #
 #       Note: Windows CE has no mainCRTStartup -- Microsoft's CE
 #       documentation assigns main() programs to mainACRTStartup (see
@@ -56,6 +57,7 @@ TARGET        ?= armv7-unknown-windows-gnu
 CC            ?= clang
 AR            ?= llvm-ar
 ARCHFLAGS     ?=
+PREFIX        ?= /usr/local
 
 INCLUDES      = -Iinclude
 

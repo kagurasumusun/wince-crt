@@ -45,14 +45,15 @@ akari_handle akari_image_handle(void);
  * entry points, before any user code runs. */
 void akari_init_args(void);
 
-/* Run global initializers in the documented order:
- *   .CRT$XI* (C) and .CRT$XC* (C++) first-to-last (link order),
- *   then the lld GNU __CTOR_LIST__ walked backward (per-object
- *   source order; objects in reverse link order, the historical
- *   GNU .ctors convention -- see runtime.c layout notes). */
+/* Run global initializers in Akari's documented order:
+ *   .CRT$XI* (C) and .CRT$XC* (C++) first-to-last (Microsoft
+ *   documents the alphabetical merging of the .CRT$X* family; lld
+ *   reproduces it, verified), then the lld __CTOR_LIST__ walked
+ *   backward (per-object source order; objects in reverse link
+ *   order -- see runtime.c layout notes). */
 void akari_run_ctors(void);
 
-/* Run global destructors from the lld GNU __DTOR_LIST__.  Words are
+/* Run global destructors from the lld __DTOR_LIST__.  Words are
  * stored per object in reverse source order and objects are
  * concatenated in link order, so walking the list forward runs
  * destructors in the exact reverse of the constructor order

@@ -26,27 +26,37 @@
  *  - Observed behavior of the LLVM/Clang/lld toolchain this CRT is
  *    built for (details and reproduction commands in README,
  *    "Verified toolchain behavior"): lld synthesises __CTOR_LIST__ /
- *    __DTOR_LIST__ arrays of the form [-1, <function pointers>, 0]
- *    from the .ctors/.dtors sections Clang emits for windows-gnu
- *    targets, and lld merges COFF sections whose names sort within
- *    the .CRT$X* family in name order, which lets the NULL sentinels
- *    below bracket MSVC-style user initializer entries.
- *  - Observed lld list layout (verified on i686 and ARMNT, one and
- *    two contributing translation units): each GNU list is the
- *    concatenation of the per-object .ctors/.dtors contents in link
- *    order, bracketed by a -1 header and a 0 terminator.  lld points
- *    __CTOR_LIST__/__DTOR_LIST__ at the -1 header (i686) or at the
- *    first real word with the header one slot earlier (ARMNT, several
- *    entries); the code below therefore skips a -1 only when it is
- *    actually at l[0], which is correct for every observed shape.
+ *    __DTOR_LIST__ arrays from the .ctors/.dtors sections Clang emits
+ *    for windows-gnu targets, and it orders the .CRT$X* family the
+ *    way Microsoft documents for its own linker ("CRT initialization",
+ *    Microsoft Learn): subsections are combined in the order of the
+ *    part after '$', so user entries (.CRT$XCU/.CRT$XIU) always land
+ *    between the NULL sentinels below (.CRT$XCA/.CRT$XCZ and
+ *    .CRT$XIA/.CRT$XIZ).  The lld ordering was verified on linked
+ *    ARMNT images with the user object placed both before and after
+ *    the CRT object: the sentinel and entry offsets are identical in
+ *    the two images and no other data falls inside the walked ranges.
+ *  - Observed lld list layout (verified on i686 and ARMNT images, one
+ *    and two contributing translation units, and with both strong and
+ *    weak references): each .ctors/.dtors list is the concatenation
+ *    of the per-object section contents in link order, bracketed by
+ *    a -1 header and a 0 terminator, and lld points
+ *    __CTOR_LIST__/__DTOR_LIST__ at the -1 header.  The walkers below
+ *    nevertheless skip a leading -1 only when it is actually present
+ *    at l[0], so they also handle a list that starts with a real
+ *    entry.
  *  - Per-object .ctors/.dtors words are stored in reverse source
- *    order (verified with several declarations per object on ARMNT):
- *    last-declared entry first.  With link-order concatenation the
- *    backward walk over __CTOR_LIST__ therefore runs constructors in
- *    reverse link order across objects (the historical GNU .ctors
- *    convention, matching libgcc's __do_global_ctors), and the
- *    forward walk over __DTOR_LIST__ runs destructors in the exact
- *    reverse of the constructor order.
+ *    order (verified with several declarations per object on i686 and
+ *    ARMNT): last-declared entry first.  With link-order
+ *    concatenation the
+ *    backward walk over __CTOR_LIST__ therefore runs each object's
+ *    constructors in source order and the objects in reverse link
+ *    order, and the forward walk over __DTOR_LIST__ runs destructors
+ *    in the exact reverse of that constructor order.  Windows CE
+ *    documentation does not specify initializer order across
+ *    objects; per-object source order with objects in reverse link
+ *    order and destructors as the exact LIFO mirror is Akari's
+ *    documented design decision (it needs no runtime bookkeeping).
  *
  * This file makes no libc calls: it uses only the coredll imports
  * listed below (C library features such as malloc/atexit belong to
@@ -142,10 +152,11 @@ DEFINE_CRT_TERM(XCZ)
 
 #undef DEFINE_CRT_TERM
 
-/* lld (COFF, windows-gnu flavour) defines these unconditionally from
- * the input .ctors/.dtors sections; declared weak so that linking
- * with a different PE linker degrades to "no GNU list" instead of a
- * hard error. */
+/* lld (COFF, windows-gnu flavour) defines these from the input
+ * .ctors/.dtors sections when they are referenced (weak references
+ * included, verified); declared weak so that linking with a
+ * different PE linker degrades to "no lists" instead of a hard
+ * error. */
 extern init_fn __CTOR_LIST__[] WEAK;
 extern init_fn __DTOR_LIST__[] WEAK;
 
@@ -537,12 +548,13 @@ void akari_init_args(void)
 
 void akari_run_ctors(void)
 {
-    /* Ranges of MSVC-style initializer pointers are walked
-     * first-to-last (lld merges .CRT$XI* / .CRT$XC* in section-name
-     * order, i.e. in link order).  The GNU lists are walked backward
-     * (see the layout notes at the top of this file): entries of one
-     * object run in source order, objects run in reverse link order,
-     * which is the historical GNU .ctors convention. */
+    /* Ranges of MS-style initializer pointers (.CRT$XI* / .CRT$XC*)
+     * are walked first-to-last: Microsoft documents alphabetical
+     * merging of the .CRT$X* family and lld reproduces it (verified;
+     * see the notes at the top of this file).  The .ctors list is
+     * walked backward per the layout notes above: entries of one
+     * object run in source order, objects run in reverse link
+     * order. */
     init_fn *p;
 
     for (p = xi_begin; p < xi_end; p++) {
@@ -560,7 +572,7 @@ void akari_run_ctors(void)
         size_t n = 0;
 
         if ((uintptr_t) l[0] == (uintptr_t) -1) {
-            l++;        /* GNU sentinel header (lld, i686 shape) */
+            l++;        /* leading -1 sentinel (lld) */
         }
         while (l[n]) {
             n++;
@@ -576,11 +588,12 @@ void akari_run_ctors(void)
 
 void akari_run_dtors(void)
 {
-    /* The .dtors list is laid out in reverse declaration order by the
-     * compiler (verified: two destructors declared da then db appear
-     * as [db, da]), so running it forward yields last-declared first
-     * (LIFO), which matches the documented destructor-at-exit order
-     * used by the C++ ABI / atexit machinery. */
+    /* Per-object .dtors words are stored in reverse declaration order
+     * by the compiler (verified: destructors declared da then db
+     * appear as [db, da]) and objects are concatenated in link order,
+     * so running the list forward yields the exact LIFO mirror of
+     * akari_run_ctors: last-constructed entries are destroyed first
+     * (see the layout notes at the top of this file). */
     if (__DTOR_LIST__) {
         init_fn *l = __DTOR_LIST__;
         size_t n = 0;
@@ -601,14 +614,13 @@ void akari_run_dtors(void)
 /* ------------------------------------------------------------------ */
 /* x86-only: ___main                                                  */
 /*                                                                     */
-/* The i386 PE/GNU convention (inherited from the original MinGW
- * toolchain and still emitted by Clang for i686 windows-gnu targets)
- * makes main() call ___main before touching arguments.  In the
- * MinGW runtime that hook ran the global-constructor machinery; here
- * the CRT entry point already ran every constructor before calling
- * the user function, so ___main must simply exist.  It is defined
- * weak so that a consumer C library that provides its own semantics
- * overrides it.                                                        */
+/* Clang for i686 windows-gnu targets compiles a call to ___main at
+ * the top of every user main() (observed in this toolchain's object
+ * output), so the symbol must exist in every such link.  Here the CRT
+ * entry point has already run every constructor before the user
+ * function is called, so ___main is an empty no-op.  It is defined
+ * weak so that a consumer C library that provides its own
+ * implementation overrides it.                                        */
 /* ------------------------------------------------------------------ */
 
 #if AKARI_CPU_X86

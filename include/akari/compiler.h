@@ -13,9 +13,9 @@
  *  - Microsoft C-language documentation on __cdecl/__stdcall name
  *    decoration (x86: leading underscore for C names; __stdcall adds
  *    @n, which Windows CE does not use).
- *  - GNU/Clang "asm labels" documentation for pinning COFF symbol
- *    names, and the MSVC x86 convention that C symbols carry a
- *    leading underscore.
+ *  - Clang's "asm labels" documentation for pinning COFF symbol names,
+ *    and Microsoft's documented x86 C name decoration (leading
+ *    underscore for C names).
  *
  * The macro set is deliberately small.  Everything that is truly
  * CPU-specific (parameter passing, stack layout, EH tables) belongs
@@ -68,15 +68,20 @@
  *
  * Desktop Win32 (non-CE, 32-bit x86) uses __stdcall; every CE
  * architecture uses the plain C convention:
- *   - ARM / Thumb (CE 4-6): single register-based convention; the
- *     Microsoft CE "/ENTRY (Windows CE 5.0)" topic requires entry
- *     functions to be __cdecl, which on ARM is the only convention.
+ *   - ARM / Thumb (CE 4-6): register-based convention; the Microsoft
+ *     CE "/ENTRY (Windows CE 5.0)" topic requires entry functions to
+ *     be __cdecl, which on ARM is the default register-based
+ *     convention (Microsoft's calling-convention documentation notes
+ *     that the __stdcall/__cdecl keywords are accepted but ignored on
+ *     ARM).
  *   - x86 CE: Microsoft's CE documentation states the CRT entry
  *     functions (WinMain, wWinMain, DllMain, and the *CRTStartup
  *     functions that call them) must be defined __cdecl, i.e. the
  *     callee does NOT pop arguments and C names are decorated only
  *     with a leading underscore (no @n stdcall decoration).
- *   - MIPS / SuperH: single register-based convention.
+ *   - MIPS / SuperH: register-based calling conventions, so the
+ *     distinction __stdcall encodes on x86 (callee stack cleanup and
+ *     the @n name suffix) does not apply; WINAPI adds nothing there.
  *
  * Hence WINAPI expands to __stdcall ONLY on desktop 32-bit x86 and
  * to nothing everywhere else.  Consumers targeting CE must define
@@ -89,8 +94,8 @@
 #    define WINAPI
 #  endif
 
-/* Which CPU family we are on (for x86-only alias spellings of the
- * entry names, mirroring the eVC/older CE x86 tools' leading
+/* Which CPU family we are on (for the x86-only alias spellings of
+ * the entry names: on 32-bit x86, C names carry a leading
  * underscore). */
 #  if defined(__i386__) || defined(_M_IX86)
 #    define AKARI_CPU_X86 1

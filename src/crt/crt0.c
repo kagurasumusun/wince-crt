@@ -18,9 +18,11 @@
  * they call as __cdecl on Windows CE (no stdcall @n decoration on
  * x86).  The same names are also valid on ARM/Thumb where C names
  * carry no decoration at all.  The C identifiers are pinned to the
- * exact PE/COFF spellings above with GNU asm labels; on 32-bit x86
- * extra underscore-prefixed aliases (the older CE x86 toolchain
- * spelling, e.g. _WinMainCRTStartup) are provided as well.
+ * exact PE/COFF spellings above with asm labels; on 32-bit x86 extra
+ * underscore-prefixed aliases (e.g. _WinMainCRTStartup) are provided
+ * as well, matching the decorated spelling that an x86 C compiler
+ * gives these C names (leading underscore; Microsoft's documented
+ * x86 C name decoration, observable in i686 Clang output too).
  *
  * Windows CE defines no console/subsystem split for EXEs beyond the
  * /SUBSYSTEM:WINDOWSCE header: which of main/wmain/WinMain/wWinMain
@@ -195,12 +197,13 @@ void mainWCRTStartup(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* x86-only aliases: the older Windows CE x86 toolchains (eVC class)
- * decorate C names with a leading underscore, so images and build
- * scripts from that world spell the entries _WinMainCRTStartup,
- * _wWinMainCRTStartup, _mainACRTStartup, _mainWCRTStartup.  Provide
- * them on 32-bit x86 only (ARM/Thumb never used the decoration; the
- * plain names above are the documented CE spellings there).         */
+/* x86-only aliases: on 32-bit x86, C names carry a leading underscore
+ * (Microsoft's documented x86 C name decoration; also visible in i686
+ * Clang output), so link lines and build tools may spell the entries
+ * _WinMainCRTStartup, _wWinMainCRTStartup, _mainACRTStartup,
+ * _mainWCRTStartup.  Provide them on 32-bit x86 only; on ARM/Thumb C
+ * names carry no decoration and the plain names above are the CE
+ * spellings there.                                                  */
 /* ------------------------------------------------------------------ */
 
 #if AKARI_CPU_X86

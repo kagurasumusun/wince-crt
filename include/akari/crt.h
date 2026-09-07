@@ -12,13 +12,13 @@
  * platform's corelibc equivalent built from newlib-style sources, an
  * llvm-libc port, or a C library linked from coredll imports).
  *
- * The symbols declared here are per-process data objects of the
- * MSVCRT data model (__argc/__argv/...) that no OS DLL exports; each
- * EXE and each DLL module that uses them links its own copy from
- * Akari.  The wide forms are the native ones on Windows CE (only the
- * Unicode forms of the command-line APIs exist on CE); the narrow
- * forms are synthesized with WideCharToMultiByte(CP_ACP) when the
- * converter is present in the OS image and lossily otherwise.
+ * The symbols declared here are the per-process data objects of the
+ * MSVCRT data model (__argc/__argv/...); each EXE and each DLL module
+ * that uses them links its own copy from Akari, since the OS DLLs do
+ * not provide them.  The wide forms are the native ones on Windows CE
+ * (only the Unicode forms of the command-line APIs exist on CE); the
+ * narrow forms are synthesized with WideCharToMultiByte(CP_ACP) when
+ * the converter is present in the OS image and lossily otherwise.
  *
  * Windows CE has no POSIX environment block: envp is NULL for
  * main()/wmain() and there is no environ.
