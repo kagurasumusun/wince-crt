@@ -390,6 +390,44 @@ reference pages for these functions live in the `(v=msdn.10)` archive.
 No other contradiction was found with the platform documentation, and
 no code change resulted from the re-check.
 
+#### CRT function-coverage audit (no insufficiency found)
+
+The remaining official CRT families were fetched in full and checked
+for anything Akari's startup layer must do that it does not:
+* *Microsoft C Run-time Library for Windows CE* (`ms861487`) structures
+  the CE run-time library into: *C Run-time Libraries* (`ms859579`),
+  *Run-time Routines by Category* (`ms859589`: buffer manipulation,
+  character classification, data conversion, floating-point support,
+  input and output, memory allocation, process control, sorting,
+  string manipulation), *Global Variables and Standard Types*
+  (`ms859596`), *Run-Time Library Global Constants* (`ms861495`),
+  *Generic Text Mappings* (`ms861474`) and the alphabetical
+  *Run-time Library Reference* (`ms859613`), plus *Required and
+  Optional Headers* (`ms859587`).  All of those describe **library
+  (libc) routines**, which this repository does not provide (see the
+  responsibility table) — nothing there prescribes behavior for the
+  startup layer Akari implements, so there is no missing
+  functionality to add.
+* *Global Variables (Windows CE 5.0)* (`ms861480`) documents exactly
+  one CE run-time global variable: `_fmode` (`ms860503`, “Sets default
+  file-translation mode”), which Akari provides.  Akari's remaining
+  data globals (`__argc`, `__argv`, `__wargv`, `_acmdln`, `_wcmdln`,
+  `_wcmdtail`, `_doserrno`, `_commode`, `__dso_handle`) are not
+  documented CE run-time globals; they are the MSVCRT-model names that
+  CE-targeting libc/CRT consumers and headers expect, and since coredll
+  exports no data objects (verified), the startup layer is their
+  natural home — recorded as own design on top of the one documented
+  global.
+* *GetCommandLine (Windows CE 5.0)* (`ms885605`, fetched in full):
+  “Windows CE supports only the Unicode version”, CE 3.0+, Winbase.h,
+  Coredll.lib.  No CE page states whether the returned string includes
+  the program name or how an empty command line is composed, so the
+  parser's argv[0] and empty-command-line handling rests on the
+  documented CommandLineToArgvW rules (see “Command-line parsing
+  rules”) plus the CE `WinMain` statement that `lpCmdLine` excludes
+  the program name — the strongest official sources that exist for
+  these points.
+
 ### Verified toolchain behavior (kagurasumusun/llvm-project, branch LLVM-WinCE)
 
 All items below were verified with the toolchain's clang/lld build from
