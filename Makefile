@@ -43,12 +43,12 @@
 #
 # Cross-build usage (verified with the kagurasumusun/llvm-project
 # WinCE driver, branch LLVM-WinCE -- the *-pc-wince triple):
-#   make                                        # arm-pc-wince (default: ARMv5TE, armel ABI, CE 6.0)
+#   make                                        # arm-pc-wince (armel ABI, CE 6.0;
+#                                               #  ARMv5TE codegen selected by WCE_ARCHFLAGS)
 #   make TARGET=arm-pc-wince                    # same, explicitly
 #   make TARGET=arm-pc-wince5.0                 # CE 5.0 deployment (_WIN32_WCE=0x500)
 #   make TARGET=arm-pc-wince4.2                 # CE 4.2 deployment (_WIN32_WCE=0x420)
-#   make TARGET=i386-pc-wince                   # x86 CE
-#   make TARGET=armv7-unknown-windows-gnu ARCHFLAGS=-mthumb  # ARMv7 Thumb-2 (windows-gnu)
+#   make TARGET=i386-pc-wince                   # x86 CE#   make TARGET=armv7-unknown-windows-gnu ARCHFLAGS=-mthumb  # ARMv7 Thumb-2 (windows-gnu)
 #   make TARGET=armv7-unknown-windows-gnu       # ARMv7 ARM state (windows-gnu)
 #   make TARGET=i686-unknown-windows-gnu        # x86 (windows-gnu)
 #   make TARGET=<triple> CC=/path/to/clang AR=/path/to/llvm-ar
@@ -87,13 +87,36 @@ else
 CE_DEFINES = -D_WIN32_WCE=0x0500
 endif
 
+# WCE_ARCHFLAGS: the ARM core is asked for by option.  The WinCE driver
+# of kagurasumusun/llvm-project (LLVM-WinCE, 2026-09-10 and later:
+# commits 71f4db8c "Pin the CE CPU answer against the generic rules" and
+# 0583ffe45 "Reach v5TEJ by option in the CE CPU pin") answers a bare
+# *-pc-wince ARM triple with the generic ARM default CPU, arm7tdmi
+# (ARMv4T) -- "Windows CE ran on more than one kind of core and never
+# named one of its own", so the core no longer comes from the OS and
+# v5TEJ must be requested with -march (writing armv5tej into the triple
+# is rewritten by the driver down to v5E before the CPU lookup).
+# ARMv4T has no BLX, and the fork's ARM COFF codegen cannot lower a
+# __attribute__((dllimport)) call there yet (isel "Cannot select ...
+# load from got" on the __imp_ call operand).  The CRT keeps its
+# historically link-verified ARMv5TE codegen by selecting it here.
+ifneq (,$(findstring wince,$(TARGET)))
+ifneq (,$(filter arm% thumb%,$(TARGET)))
+WCE_ARCHFLAGS = -march=armv5tej
+else
+WCE_ARCHFLAGS =
+endif
+else
+WCE_ARCHFLAGS =
+endif
+
 TARGET_FLAGS  = -D_AKARI_BUILD=1 $(CE_DEFINES) \
                 -fno-builtin -nostdlibinc -fno-stack-protector
 
 CFLAGS        = -Os -ffunction-sections -fdata-sections \
                 -Wall -Wextra -Wshadow -Wstrict-prototypes \
                 -Wmissing-prototypes \
-                $(ARCHFLAGS) $(INCLUDES) $(TARGET_FLAGS)
+                $(ARCHFLAGS) $(WCE_ARCHFLAGS) $(INCLUDES) $(TARGET_FLAGS)
 
 BUILD         = build
 C_SRCS        = src/crt/crt0.c src/crt/dllcrt.c src/crt/runtime.c

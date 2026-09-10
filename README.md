@@ -22,11 +22,21 @@ Akari is built and link-verified with the Windows CE toolchain of
 (branch `LLVM-WinCE`): clang/lld with a WinCE driver, COFF/CE support in
 lld, and the `*-pc-wince` target triple (`arm-pc-wince` and
 `i386-pc-wince`, optionally versioned as `arm-pc-wince5.0` /
-`arm-pc-wince4.2` / ...).  In that toolchain the ARM target defaults to
-the **`armel` ABI**: ARMv5TE (`arm926ej-s`), little-endian, AAPCS
-soft-float (`-mfloat-abi=soft`); clang predefines `_WIN32_WCE`,
-`UNDER_CE`, `__ARMEL__`, `__ARM_PCS` etc. for it.  CE deployment
-versions select the coredll import surface and the `_WIN32_WCE` value.
+`arm-pc-wince4.2` / ...).  The ARM target uses the **`armel` ABI**:
+little-endian, AAPCS soft-float (`-mfloat-abi=soft`); clang predefines
+`_WIN32_WCE`, `UNDER_CE`, `__ARMEL__`, `__ARM_PCS` etc. for it.  CE
+deployment versions select the coredll import surface and the
+`_WIN32_WCE` value.
+
+**ARM core selection (2026-09-10 toolchain and later).**  The WinCE
+driver now answers a bare `*-pc-wince` ARM triple with the generic ARM
+default CPU, `arm7tdmi` (ARMv4T) — Windows CE never named a core of its
+own, so the core is *asked for by option* (`-march=armv5tej` /
+`-mcpu=arm926ej-s`) rather than implied by the OS.  ARMv4T has no `BLX`,
+and the toolchain's ARM COFF codegen cannot yet lower a
+`__attribute__((dllimport))` call there, so Akari's Makefile passes
+`-march=armv5tej` for every `*-pc-wince` ARM build (`WCE_ARCHFLAGS`),
+keeping the ARMv5TE codegen the CRT has always been link-verified with.
 
 Plain `*-windows-gnu` triples (`armv7-unknown-windows-gnu`,
 `i686-unknown-windows-gnu`, Thumb-2 with `-mthumb`) remain supported
